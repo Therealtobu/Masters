@@ -1,9 +1,5 @@
 -- ============================================================
---  MASTERS STANDALONE EXECUTOR  [PATCHED v5]
---  Fixes v5:
---   • Mobile executor: không show Full UI lúc inject; chỉ reveal bar toggle sau khi Handler setup xong
---   • Mobile executor: throttle audio discovery theo chunk + delay thay vì dồn một lúc
---   • Mobile executor: bỏ ép full UI khi SetState("Full"), chỉ giữ layout mobile-safe
+--  MASTERS STANDALONE EXECUTOR  [PATCHED v4]
 --  Fixes v4:
 --   • Mobile executor: ép layout mobile/fullscreen thay vì UI desktop khi viewport lớn
 --   • Mobile executor: tắt glow/haptics nặng để giảm nguy cơ crash/văng app
@@ -27,9 +23,6 @@ local CONFIG = {
     FAKE_VERSION    = "102",
     -- "auto" = tự nhận diện điện thoại/tablet; true = luôn ép mobile UI; false = tắt patch mobile.
     FORCE_MOBILE_UI = "auto",
-    MOBILE_STARTUP_REVEAL_DELAY = 1.1,
-    MOBILE_AUDIO_CHUNK_SIZE = 25,
-    MOBILE_AUDIO_CHUNK_DELAY = 1,
 }
 
 local function Log(...)
@@ -307,61 +300,29 @@ if not StorageFolder then error("[Masters] Masters(Storage) not found in model."
 if not MastersGui    then Warn("No suitable ScreenGui found.") end
 if not HandlerScript then Warn("No Handler script found.") end
 
-local function GetMobileGuiBits(gui)
-    local interface = gui and gui:FindFirstChild("Interface", true)
-    local frame = interface and interface:FindFirstChild("Frame")
-    local bar = frame and frame:FindFirstChild("Bar")
-    local page = frame and frame:FindFirstChildWhichIsA("UIPageLayout")
-
-    return interface, frame, bar, page
-end
-
-local function ApplyMobileBarState(gui)
-    local interface, frame, bar, page = GetMobileGuiBits(gui)
-
-    if interface and interface:IsA("GuiObject") then
-        interface:SetAttribute("State", "Bar")
-        interface.AnchorPoint = Vector2.new(0.5, 0.5)
-        interface.Position = UDim2.fromScale(0.5, 0.5)
-        interface.Size = UDim2.fromOffset(300, 120)
-        interface.ImageTransparency = 0.8
-    end
-
-    if frame then
-        pcall(function() frame.Modal = false end)
-    end
-
-    if page and bar then
-        pcall(function() page:JumpTo(bar) end)
-    end
-end
-
 local function ApplyMobileGuiPatches(gui)
     if not MOBILE_EXECUTOR or not gui then return end
-
-    -- Hide the raw cloned ScreenGui first. The rbmx can briefly display its
-    -- default/full page before Handler calls Main.SetState("Bar"), which is the
-    -- flash users saw right before the app crashed.
-    gui.Enabled = false
 
     pcall(function() gui.IgnoreGuiInset = false end)
     pcall(function() gui.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets end)
     pcall(function() gui.ClipToDeviceSafeArea = false end)
 
-    ApplyMobileBarState(gui)
-    Log("Prepared mobile-safe bar startup")
-end
+    local interface = gui:FindFirstChild("Interface", true)
+    if interface and interface:IsA("GuiObject") then
+        interface.AnchorPoint = Vector2.new(0.5, 0.5)
+        interface.Position = UDim2.fromScale(0.5, 0.5)
+        interface.Size = UDim2.fromScale(1, 1)
 
-local function RevealMobileStartupBar(gui)
-    if not MOBILE_EXECUTOR or not gui then return end
+        local scale = interface:FindFirstChild("MobileExecutorScale")
+        if not scale then
+            scale = Instance.new("UIScale")
+            scale.Name = "MobileExecutorScale"
+            scale.Parent = interface
+        end
+        scale.Scale = 1
+    end
 
-    task.delay(CONFIG.MOBILE_STARTUP_REVEAL_DELAY, function()
-        if not gui or not gui.Parent then return end
-
-        ApplyMobileBarState(gui)
-        gui.Enabled = true
-        Log("Revealed mobile startup bar")
-    end)
+    Log("Applied mobile-safe GUI defaults")
 end
 
 local function ApplyMobileModulePatches(storageRoot)
@@ -388,77 +349,13 @@ local function ApplyMobileModulePatches(storageRoot)
     if audiosModule then
         local ok, audios = pcall(require, audiosModule)
         if ok and type(audios) == "table" then
-            local mobileAudiosLoaded = false
-
-            audios.LoadAudios = function(container)
-                task.spawn(function()
-                    local okSearch, pages = pcall(function()
-                        local params = Instance.new("AudioSearchParams")
-                        params.MinDuration = 30
-                        params.SearchKeyword = ""
-
-                        return game:GetService("AssetService"):SearchAudio(params)
-                    end)
-
-                    if not okSearch or not pages then
-                        mobileAudiosLoaded = true
-                        pcall(function() audios.ChunkLoadingFinished:Fire() end)
-                        Warn("Mobile audio discovery skipped:", tostring(pages))
-                        return
-                    end
-
-                    local index = 1
-                    local chunk = {}
-                    local chunkSize = CONFIG.MOBILE_AUDIO_CHUNK_SIZE
-                    local chunkDelay = CONFIG.MOBILE_AUDIO_CHUNK_DELAY
-
-                    while true do
-                        local okPage, items = pcall(function()
-                            return pages:GetCurrentPage()
-                        end)
-
-                        if okPage and items then
-                            for _, audio in items do
-                                table.insert(chunk, audio)
-
-                                if #chunk >= chunkSize then
-                                    if container then container[index] = chunk end
-                                    pcall(function() audios.ChunkLoaded:Fire(index, chunk) end)
-
-                                    index += 1
-                                    chunk = {}
-                                    task.wait(chunkDelay)
-                                end
-                            end
-                        end
-
-                        local finished = false
-                        pcall(function() finished = pages.IsFinished end)
-                        if finished then break end
-
-                        local okAdvance = pcall(function()
-                            pages:AdvanceToNextPageAsync()
-                        end)
-                        if not okAdvance then break end
-
-                        task.wait(chunkDelay)
-                    end
-
-                    if #chunk > 0 then
-                        if container then container[index] = chunk end
-                        pcall(function() audios.ChunkLoaded:Fire(index, chunk) end)
-                        task.wait(chunkDelay)
-                    end
-
-                    mobileAudiosLoaded = true
+            audios.LoadAudios = function()
+                task.defer(function()
                     pcall(function() audios.ChunkLoadingFinished:Fire() end)
                 end)
             end
-
-            audios.IsLoaded = function()
-                return mobileAudiosLoaded
-            end
-            Log("Patched throttled Audios loader for mobile executor")
+            audios.IsLoaded = function() return true end
+            Log("Patched Audios loader for mobile executor")
         else
             Warn("Unable to patch Audios for mobile executor:", tostring(audios))
         end
@@ -473,15 +370,16 @@ local function ApplyMobileModulePatches(storageRoot)
                 main.__MastersMobileExecutorPatched = true
                 main.SetState = function(state)
                     local result = originalSetState(state)
-                    if state == "Bar" then
+                    if state == "Full" then
                         task.defer(function()
-                            ApplyMobileBarState(PlayerGui:FindFirstChild("Masters"))
+                            pcall(function() main.Fullscreen(true) end)
+                            pcall(function() main.Sidebar(false) end)
                         end)
                     end
                     return result
                 end
             end
-            Log("Patched Main bar-state guard for mobile executor")
+            Log("Patched Main for mobile executor")
         else
             Warn("Unable to patch Main for mobile executor:", tostring(main))
         end
@@ -508,6 +406,7 @@ if MastersGui then
     GuiClone = MastersGui:Clone()
     ApplyMobileGuiPatches(GuiClone)
     GuiClone.Parent = PlayerGui
+    ApplyMobileGuiPatches(GuiClone)
     Log("Injected ScreenGui →", GuiClone.Name)
 end
 
@@ -918,11 +817,11 @@ end
 
 -- ============================================================
 print("╔══════════════════════════════════════════╗")
-print("║  Masters Standalone Executor [FIXED v5]  ║")
+print("║  Masters Standalone Executor [FIXED v4]  ║")
 print("╠══════════════════════════════════════════╣")
 print("║  FIX: Correct game ScreenGui             ║")
 print("║  FIX: Preferences schema (Artists/Songs) ║")
 print("║  FIX: Algorithm schema (Songs/Tags/...)  ║")
 print("║  FIX: Modules.Settings + TextFiltering   ║")
-print("║  FIX: Mobile executor safe bar startup   ║")
+print("║  FIX: Mobile executor safe UI            ║")
 print("╚══════════════════════════════════════════╝")
