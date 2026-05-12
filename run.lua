@@ -1,57 +1,30 @@
 -- ============================================================
---  MASTERS STANDALONE EXECUTOR  [PATCHED v9]
---  Fixes v9:
---   • Hook thêm TextService/Input/Badge/Teleport/Social/Avatar/Group/StarterGui fallbacks
---   • Universal method fallback cho Async/Get/Set/Prompt service calls chưa biết
---   • Mock filter-result object để text filtering không cần server thật
---  Fixes v8:
---   • Universal fallback cho Masters remotes chưa mock theo từng nhóm path
---   • Hook thêm service engine Roblox thường dùng bởi UI/player/audio/http
---   • Hydrate toàn bộ GuiObject Interactable/Active để UI không kẹt preview
---  Fixes v7:
---   • Mock audio metadata/library fallback để Discovery có list nhạc thật thay vì preview rỗng
---   • Personalize placeholder "river" thành username hiện tại
---   • Bật lại Interactable/ẩn loading sau Handler để UI dùng được nếu module load chậm
---  Fixes v6:
---   • Không cho Handler trong GUI clone auto-run trước khi hook/mock sẵn sàng
---   • Cài hook + mock trước rồi mới require/patch module và start Handler duy nhất
---   • Fix check IsA trong hook và swallow Masters remote chưa mock để tránh gọi server thật
---  Fixes v5:
---   • Mobile executor: không show Full UI lúc inject; chỉ reveal bar toggle sau khi Handler setup xong
---   • Mobile executor: throttle audio discovery theo chunk + delay thay vì dồn một lúc
---   • Mobile executor: bỏ ép full UI khi SetState("Full"), chỉ giữ layout mobile-safe
---  Fixes v4:
---   • Mobile executor: ép layout mobile/fullscreen thay vì UI desktop khi viewport lớn
---   • Mobile executor: tắt glow/haptics nặng để giảm nguy cơ crash/văng app
---   • Mobile executor: patch Utilities.GetViewportRatio trước khi Handler chạy
---  Fixes v3:
---   • Preferences schema đúng: Artists.Block / Songs.Favorite / Songs.Dislike
---   • Algorithm schema đúng: Songs[] / Tags[] / Artists[] (arrays, not dicts)
---   • Library schema đúng: Songs[] / Artists[] arrays
---   • Thêm mock Modules.Settings.FetchSettings (path khác với Main.Settings)
---   • Thêm mock Modules.TextFiltering.FilterText
---   • Correct game ScreenGui (không lấy Plugin Onboarding)
---   • Thêm mock GetConfigurationServer / GetLocalStationsServer
+--  MASTERS STANDALONE EXECUTOR [CLEAN v10]
+--  New clean single-file runner: no patch stack / conflict blocks.
+--  - Quarantines cloned GUI scripts so only one Handler runs.
+--  - Hooks Masters remotes with schema-safe fallback data.
+--  - Hooks common Roblox services used by the engine/UI.
+--  - Provides local songs, username hydration, and UI un-freeze.
 -- ============================================================
 
 local CONFIG = {
-    USE_LOCAL_FILE  = true,
+    USE_LOCAL_FILE = true,
     LOCAL_FILE_PATH = "Masters.rbxmx",
-    ASSET_ID        = 0,
-    SAVE_FILE       = "masters_local_data.json",
-    DEBUG           = false,
-    FAKE_VERSION    = "102",
-    -- "auto" = tự nhận diện điện thoại/tablet; true = luôn ép mobile UI; false = tắt patch mobile.
-    FORCE_MOBILE_UI = "auto",
-    MOBILE_STARTUP_REVEAL_DELAY = 1.1,
-    MOBILE_AUDIO_CHUNK_SIZE = 25,
-    MOBILE_AUDIO_CHUNK_DELAY = 1,
+    ASSET_ID = 0,
+    SAVE_FILE = "masters_local_data.json",
+    DEBUG = false,
+    FAKE_VERSION = "102",
+    REVEAL_DELAY = 0.75,
+    AUDIO_CHUNK_DELAY = 0.25,
 }
 
 local function Log(...)
     if CONFIG.DEBUG then print("[Masters]", ...) end
 end
-local function Warn(...) warn("[Masters]", ...) end
+
+local function Warn(...)
+    warn("[Masters]", ...)
+end
 
 local UserInputService = game:GetService("UserInputService")
 local DefaultSettings
@@ -163,462 +136,266 @@ end
 --  SERVICES
 -- ============================================================
 
-local Players           = game:GetService("Players")
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local InsertService     = game:GetService("InsertService")
-local HttpService       = game:GetService("HttpService")
-local AssetService      = game:GetService("AssetService")
-local UserService       = game:GetService("UserService")
+local InsertService = game:GetService("InsertService")
+local HttpService = game:GetService("HttpService")
+local AssetService = game:GetService("AssetService")
 local MarketplaceService = game:GetService("MarketplaceService")
-local PolicyService     = game:GetService("PolicyService")
-local ContentProvider   = game:GetService("ContentProvider")
-local HapticService     = game:GetService("HapticService")
-local GuiService        = game:GetService("GuiService")
-local TextService       = game:GetService("TextService")
-local BadgeService      = game:GetService("BadgeService")
-local TeleportService   = game:GetService("TeleportService")
-local SocialService     = game:GetService("SocialService")
+local PolicyService = game:GetService("PolicyService")
+local UserService = game:GetService("UserService")
+local ContentProvider = game:GetService("ContentProvider")
+local TextService = game:GetService("TextService")
+local HapticService = game:GetService("HapticService")
+local GuiService = game:GetService("GuiService")
+local UserInputService = game:GetService("UserInputService")
+local BadgeService = game:GetService("BadgeService")
+local TeleportService = game:GetService("TeleportService")
+local SocialService = game:GetService("SocialService")
 local AvatarEditorService = game:GetService("AvatarEditorService")
-local GroupService      = game:GetService("GroupService")
-local StarterGui        = game:GetService("StarterGui")
+local GroupService = game:GetService("GroupService")
+local StarterGui = game:GetService("StarterGui")
 
-client          = Players.LocalPlayer
+local client = Players.LocalPlayer
 local PlayerGui = client:WaitForChild("PlayerGui")
 
 -- ============================================================
---  MOBILE DETECT
+--  LOCAL MOCK DATA
 -- ============================================================
 
-local function IsMobileExecutor()
-    if CONFIG.FORCE_MOBILE_UI == true  then return true  end
-    if CONFIG.FORCE_MOBILE_UI == false then return false end
-    local ok, result = pcall(function()
-        local vp        = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.zero
-        local touchOnly = UserInputService.TouchEnabled
-            and not UserInputService.KeyboardEnabled
-            and not UserInputService.MouseEnabled
-        local phoneVP   = vp.X > 0 and vp.Y > 0 and math.min(vp.X, vp.Y) <= 700
-        return UserInputService.TouchEnabled and (touchOnly or phoneVP)
-    end)
-    return ok and result == true
+local LOCAL_AUDIO_LIBRARY = {
+    { Id = 1843529634, Title = "Relaxed Scene", Artist = "Roblox", Duration = 183, Tags = {"ambient", "chill"} },
+    { Id = 1845756489, Title = "Town Talk", Artist = "Roblox", Duration = 124, Tags = {"pop", "bright"} },
+    { Id = 1841647093, Title = "Life in an Elevator", Artist = "Roblox", Duration = 91, Tags = {"electronic", "chill"} },
+    { Id = 1837849285, Title = "Happy Home", Artist = "Roblox", Duration = 134, Tags = {"happy", "pop"} },
+    { Id = 1846458016, Title = "No More", Artist = "Roblox", Duration = 156, Tags = {"electronic", "dance"} },
+    { Id = 1848354536, Title = "Sunny", Artist = "Roblox", Duration = 138, Tags = {"bright", "pop"} },
+    { Id = 9048375035, Title = "Lo-Fi Chill A", Artist = client.Name, Duration = 142, Tags = {"lofi", "chill"} },
+    { Id = 9048376689, Title = "Lo-Fi Chill B", Artist = client.Name, Duration = 165, Tags = {"lofi", "ambient"} },
+}
+
+local function cloneArray(source)
+    local out = {}
+    for i, value in ipairs(source or {}) do
+        out[i] = value
+    end
+    return out
 end
 
-local MOBILE_EXECUTOR = IsMobileExecutor()
+local function cloneAudio(entry)
+    return {
+        Id = entry.Id,
+        AssetId = entry.Id,
+        SongId = entry.Id,
+        Title = entry.Title,
+        Name = entry.Title,
+        Artist = entry.Artist,
+        Creator = { Id = 1, Name = entry.Artist, CreatorType = "User" },
+        Duration = entry.Duration,
+        Tags = cloneArray(entry.Tags),
+    }
+end
 
--- ============================================================
---  LOCAL DATA SCHEMAS
--- ============================================================
+local function localAudioIds()
+    local ids = {}
+    for _, entry in ipairs(LOCAL_AUDIO_LIBRARY) do
+        table.insert(ids, entry.Id)
+    end
+    return ids
+end
 
-function DefaultSettings()
+local function localAudioMetadata(assetIds)
+    if type(assetIds) ~= "table" then assetIds = { assetIds } end
+    local byId = {}
+    for _, entry in ipairs(LOCAL_AUDIO_LIBRARY) do
+        byId[tonumber(entry.Id)] = entry
+    end
+
+    local result = {}
+    for index, assetId in ipairs(assetIds or {}) do
+        local entry = byId[tonumber(assetId)] or LOCAL_AUDIO_LIBRARY[((index - 1) % #LOCAL_AUDIO_LIBRARY) + 1]
+        table.insert(result, cloneAudio(entry))
+    end
+    return result
+end
+
+local function localAudioPages()
+    local pages = { IsFinished = true }
+    function pages:GetCurrentPage()
+        return localAudioMetadata(localAudioIds())
+    end
+    function pages:AdvanceToNextPageAsync()
+        self.IsFinished = true
+    end
+    return pages
+end
+
+local function defaultSettings()
     return {
         Playback = {
-            Crossfade  = { Enabled = true,  Duration = 3 },
-            Equalizer  = { Enabled = false, HighGain = 0, MidGain = 0, LowGain = 0 },
+            Crossfade = { Enabled = true, Duration = 3 },
+            Equalizer = { Enabled = false, HighGain = 0, MidGain = 0, LowGain = 0 },
         },
-        Extras  = { Glow = true, PlaybackHaptics = false },
+        Extras = { Glow = false, PlaybackHaptics = false },
         Socials = { ListeningVisibility = false, Sharing = false },
     }
 end
 
-local function DefaultPreferences()
-    return { Artists = { Block = {} }, Songs = { Favorite = {}, Dislike = {} } }
-end
-
-local function DefaultAlgorithm()
-    return { Artists = {}, Songs = {}, Tags = {} }
-end
-
-local function DefaultLibrary()
-    return { Artists = {}, Songs = {}, Playlists = {} }
-end
-
-LocalData = {
-    Settings      = DefaultSettings(),
-    Preferences   = DefaultPreferences(),
-    Algorithm     = DefaultAlgorithm(),
-    Library       = DefaultLibrary(),
+local LocalData = {
+    Settings = defaultSettings(),
+    Preferences = { Artists = { Block = {} }, Songs = { Favorite = {}, Dislike = {} } },
+    Algorithm = {
+        Artists = { { Name = "Roblox", Relevance = 20, LastUpdate = os.time() } },
+        Tags = { { Tag = "chill", Relevance = 20, LastUpdate = os.time() } },
+        Songs = {},
+    },
+    Library = { Artists = { "Roblox" }, Songs = localAudioIds(), Playlists = {} },
     LocalStations = {},
     Configuration = {
-        Access = {
-            PermitEveryone = true,
-            LinkPasses     = {},
-            LinkGroups     = {},
-            LinkPlayers    = {},
-        },
-        Stations       = { AutoStart = "", OnlineStations = true },
+        Access = { PermitEveryone = true, LinkPasses = {}, LinkGroups = {}, LinkPlayers = {} },
+        Stations = { AutoStart = "", OnlineStations = true },
         CustomSections = {
-            LocalMastersPicks = {
-                Name = "Masters Picks",
-                Songs = GetLocalAudioIds(),
-            },
+            LocalMastersPicks = { Name = "Masters Picks", Songs = localAudioIds() },
         },
     },
 }
 
-local function ApplyMobileSettingsDefaults()
-    if not MOBILE_EXECUTOR then return end
-    if type(LocalData.Settings) ~= "table" then
-        LocalData.Settings = DefaultSettings()
-    end
-    LocalData.Settings.Extras = LocalData.Settings.Extras or {}
-    LocalData.Settings.Extras.Glow            = false
-    LocalData.Settings.Extras.PlaybackHaptics = false
-end
-
-local function SaveData()
-    if not writefile then return end
-    pcall(function()
-        writefile(CONFIG.SAVE_FILE, HttpService:JSONEncode({
-            Library       = LocalData.Library,
-            Preferences   = LocalData.Preferences,
-            Settings      = LocalData.Settings,
-            LocalStations = LocalData.LocalStations,
-        }))
-    end)
-end
-
-local function TryLoadSave()
+local function tryLoadSave()
     if not readfile then return end
     local ok, saved = pcall(function()
         return HttpService:JSONDecode(readfile(CONFIG.SAVE_FILE))
     end)
     if ok and type(saved) == "table" then
-        if saved.Library       then LocalData.Library       = saved.Library       end
-        if saved.Preferences   then LocalData.Preferences   = saved.Preferences   end
-        if saved.Settings      then LocalData.Settings      = saved.Settings      end
-        if saved.LocalStations then LocalData.LocalStations = saved.LocalStations end
-        Log("Loaded saved data")
+        if type(saved.Settings) == "table" then LocalData.Settings = saved.Settings end
+        if type(saved.Preferences) == "table" then LocalData.Preferences = saved.Preferences end
+        if type(saved.Library) == "table" then LocalData.Library = saved.Library end
+        if type(saved.LocalStations) == "table" then LocalData.LocalStations = saved.LocalStations end
     end
+    LocalData.Settings.Extras = LocalData.Settings.Extras or {}
+    LocalData.Settings.Extras.Glow = false
+    LocalData.Settings.Extras.PlaybackHaptics = false
 end
 
-TryLoadSave()
-ApplyMobileSettingsDefaults()
-
--- ============================================================
---  LOAD MODEL
--- ============================================================
-
-local MastersRoot
-
-if CONFIG.USE_LOCAL_FILE and getcustomasset then
-    local ok1, assetUrl = pcall(getcustomasset, CONFIG.LOCAL_FILE_PATH)
-    if ok1 and assetUrl then
-        local ok2, result = pcall(function() return game:GetObjects(assetUrl) end)
-        if ok2 and result and #result > 0 then
-            for _, obj in result do
-                if obj.Name == "Masters" or obj:FindFirstChild("MainFile") then
-                    MastersRoot = obj; break
-                end
-            end
-            MastersRoot = MastersRoot or result[1]
-            Log("Loaded from local file")
-        else
-            Warn("game:GetObjects() failed:", tostring(result))
-        end
-    else
-        Warn("getcustomasset() failed:", tostring(assetUrl))
-    end
-elseif CONFIG.USE_LOCAL_FILE then
-    Warn("getcustomasset not available")
-end
-
-if not MastersRoot then
-    if CONFIG.ASSET_ID == 0 then
-        error("[Masters] Model load failed. Check '" .. CONFIG.LOCAL_FILE_PATH .. "'", 2)
-    end
-    local ok, result = pcall(function() return InsertService:LoadAsset(CONFIG.ASSET_ID) end)
-    if ok and result then
-        MastersRoot = result:GetChildren()[1] or result
-    else
-        error("[Masters] InsertService failed: " .. tostring(result), 2)
-    end
-end
-
--- ============================================================
---  TÌM SCREENGUI VÀ HANDLER
--- ============================================================
-
-local StorageFolder = MastersRoot:FindFirstChild("Masters(Storage)", true)
-
-local MastersGui
-do
-    local mainFile      = MastersRoot:FindFirstChild("MainFile")
-    local mastersServer = mainFile and mainFile:FindFirstChild("Masters(Server)")
-    local components    = mastersServer and mastersServer:FindFirstChild("Components")
-    local mastersComp   = components and components:FindFirstChild("Masters")
-
-    if mastersComp and mastersComp:IsA("ScreenGui") then
-        MastersGui = mastersComp
-        Log("ScreenGui found via direct path ✓")
-    end
-
-    if not MastersGui then
-        for _, obj in MastersRoot:GetDescendants() do
-            if obj:IsA("ScreenGui") and obj:FindFirstChild("Handler", true) then
-                MastersGui = obj
-                Log("ScreenGui found via Handler search ✓")
-                break
-            end
-        end
-    end
-
-    if not MastersGui then
-        for _, obj in MastersRoot:GetDescendants() do
-            if obj:IsA("ScreenGui")
-               and obj.Name ~= "Onboarding"
-               and obj.Name ~= "MastersOnboarding" then
-                MastersGui = obj
-                Warn("Using fallback ScreenGui:", obj.Name)
-                break
-            end
-        end
-    end
-end
-
-local HandlerScript = MastersGui and MastersGui:FindFirstChild("Handler", true)
-
-if not StorageFolder then error("[Masters] Masters(Storage) not found in model.", 2) end
-if not MastersGui    then Warn("No suitable ScreenGui found.") end
-if not HandlerScript then Warn("No Handler script found.")    end
-
-local function QuarantineGuiScripts(gui)
-    if not gui then return end
-
-    for _, obj in gui:GetDescendants() do
-        if obj:IsA("LocalScript") then
-            -- The cloned ScreenGui already contains Handler. If it remains enabled
-            -- when parented to PlayerGui, it can run before __namecall is hooked
-            -- and before mock handlers are registered. That race can call real
-            -- remotes / duplicate Handler and crash executors.
-            obj.Disabled = true
-            if obj.Name == "Handler" then
-                obj:Destroy()
-            end
-        end
-    end
-end
-
-local function GetMobileGuiBits(gui)
-    local interface = gui and gui:FindFirstChild("Interface", true)
-    local frame = interface and interface:FindFirstChild("Frame")
-    local bar = frame and frame:FindFirstChild("Bar")
-    local page = frame and frame:FindFirstChildWhichIsA("UIPageLayout")
-
-    return interface, frame, bar, page
-end
-
-local function ApplyMobileBarState(gui)
-    local interface, frame, bar, page = GetMobileGuiBits(gui)
-
-    if interface and interface:IsA("GuiObject") then
-        interface:SetAttribute("State", "Bar")
-        interface.AnchorPoint = Vector2.new(0.5, 0.5)
-        interface.Position = UDim2.fromScale(0.5, 0.5)
-        interface.Size = UDim2.fromOffset(300, 120)
-        interface.ImageTransparency = 0.8
-    end
-
-    if frame then
-        pcall(function() frame.Modal = false end)
-    end
-
-    if page and bar then
-        pcall(function() page:JumpTo(bar) end)
-    end
-end
-
-local function ApplyUserPersonalization(gui)
-    if not gui then return end
-
-    local username = GetLocalUsername()
-
-    for _, obj in gui:GetDescendants() do
-        if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
-            local ok, current = pcall(function() return obj.Text end)
-            if ok and type(current) == "string" and current:lower() == "river" then
-                pcall(function() obj.Text = username end)
-            end
-        end
-    end
-
-    local sidebarUser = gui:FindFirstChild("User", true)
-    if sidebarUser then
-        local display = sidebarUser:FindFirstChild("Display", true)
-        if display and (display:IsA("TextLabel") or display:IsA("TextButton") or display:IsA("TextBox")) then
-            display.Text = username
-        end
-    end
-end
-
-local function HydrateRuntimeUi(gui)
-    if not gui then return end
-
-    ApplyUserPersonalization(gui)
-
-    local interface = gui:FindFirstChild("Interface", true)
-    if interface and interface:IsA("GuiObject") then
-        interface.Interactable = true
-    end
-
-    local loading = gui:FindFirstChild("Loading", true)
-    if loading and loading:IsA("GuiObject") then
-        loading.Visible = false
-    end
-end
-
-local function ApplyMobileGuiPatches(gui)
-    if not MOBILE_EXECUTOR or not gui then return end
-
-    -- Hide the raw cloned ScreenGui first. The rbmx can briefly display its
-    -- default/full page before Handler calls Main.SetState("Bar"), which is the
-    -- flash users saw right before the app crashed.
-    gui.Enabled = false
-
-    pcall(function() gui.IgnoreGuiInset = false end)
-    pcall(function() gui.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets end)
-    pcall(function() gui.ClipToDeviceSafeArea = false end)
-
-    ApplyMobileBarState(gui)
-    ApplyUserPersonalization(gui)
-    Log("Prepared mobile-safe bar startup")
-end
-
-local function RevealMobileStartupBar(gui)
-    if not MOBILE_EXECUTOR or not gui then return end
-
-    task.delay(CONFIG.MOBILE_STARTUP_REVEAL_DELAY, function()
-        if not gui or not gui.Parent then return end
-
-        ApplyMobileBarState(gui)
-        HydrateRuntimeUi(gui)
-        gui.Enabled = true
-        Log("Revealed mobile startup bar")
+local function saveData()
+    if not writefile then return end
+    pcall(function()
+        writefile(CONFIG.SAVE_FILE, HttpService:JSONEncode({
+            Settings = LocalData.Settings,
+            Preferences = LocalData.Preferences,
+            Library = LocalData.Library,
+            LocalStations = LocalData.LocalStations,
+        }))
     end)
 end
 
-local function ApplyMobileModulePatches(storageRoot)
-    if not MOBILE_EXECUTOR or not storageRoot then return end
+tryLoadSave()
 
-    local modules = storageRoot:FindFirstChild("Modules")
-    if not modules then return end
+-- ============================================================
+--  MODEL LOADING / DISCOVERY
+-- ============================================================
 
-    local utilitiesModule = modules:FindFirstChild("Utilities")
-    if utilitiesModule then
-        local ok, utilities = pcall(require, utilitiesModule)
-        if ok and type(utilities) == "table" then
-            utilities.GetViewportRatio = function()
-                return 0
+local function loadRoot()
+    if CONFIG.USE_LOCAL_FILE and getcustomasset then
+        local okAsset, assetUrl = pcall(getcustomasset, CONFIG.LOCAL_FILE_PATH)
+        if okAsset and assetUrl then
+            local okObjects, objects = pcall(function()
+                return game:GetObjects(assetUrl)
+            end)
+            if okObjects and type(objects) == "table" and #objects > 0 then
+                for _, obj in ipairs(objects) do
+                    if obj.Name == "Masters" or obj:FindFirstChild("MainFile") then
+                        return obj
+                    end
+                end
+                return objects[1]
             end
-            utilities.Haptic = function() end
-            Log("Patched Utilities for mobile executor")
+            Warn("game:GetObjects failed:", tostring(objects))
         else
-            Warn("Unable to patch Utilities for mobile executor:", tostring(utilities))
+            Warn("getcustomasset failed:", tostring(assetUrl))
         end
     end
 
-    local audiosModule = modules:FindFirstChild("Audios")
-    if audiosModule then
-        local ok, audios = pcall(require, audiosModule)
-        if ok and type(audios) == "table" then
-            local mobileAudiosLoaded = false
-
-            audios.GetAudioMetadataAsync = function(assetIds)
-                return GetLocalAudioMetadata(assetIds)
-            end
-
-            audios.LoadAudios = function(container)
-                task.spawn(function()
-                    local index = 1
-                    local chunk = {}
-                    local chunkSize = CONFIG.MOBILE_AUDIO_CHUNK_SIZE
-                    local chunkDelay = CONFIG.MOBILE_AUDIO_CHUNK_DELAY
-
-                    for _, entry in LOCAL_AUDIO_LIBRARY do
-                        table.insert(chunk, CloneLocalAudioEntry(entry))
-
-                        if #chunk >= chunkSize then
-                            if container then container[index] = chunk end
-                            pcall(function() audios.ChunkLoaded:Fire(index, chunk) end)
-
-                            index += 1
-                            chunk = {}
-                            task.wait(chunkDelay)
-                        end
-                    end
-
-                    if #chunk > 0 then
-                        if container then container[index] = chunk end
-                        pcall(function() audios.ChunkLoaded:Fire(index, chunk) end)
-                        task.wait(chunkDelay)
-                    end
-
-                    mobileAudiosLoaded = true
-                    pcall(function() audios.ChunkLoadingFinished:Fire() end)
-                end)
-            end
-
-            audios.IsLoaded = function()
-                return mobileAudiosLoaded
-            end
-            Log("Patched local Audios metadata/loader for mobile executor")
-        else
-            Warn("Unable to patch Audios for mobile executor:", tostring(audios))
+    if CONFIG.ASSET_ID ~= 0 then
+        local okLoad, asset = pcall(function()
+            return InsertService:LoadAsset(CONFIG.ASSET_ID)
+        end)
+        if okLoad and asset then
+            return asset:GetChildren()[1] or asset
         end
+        Warn("InsertService failed:", tostring(asset))
     end
 
-    local mainModule = modules:FindFirstChild("Main")
-    if mainModule then
-        local ok, main = pcall(require, mainModule)
-        if ok and type(main) == "table" and type(main.Fullscreen) == "function" then
-            local originalSetState = main.SetState
-            if type(originalSetState) == "function" and not main.__MastersMobileExecutorPatched then
-                main.__MastersMobileExecutorPatched = true
-                main.SetState = function(state)
-                    local result = originalSetState(state)
-                    if state == "Bar" then
-                        task.defer(function()
-                            ApplyMobileBarState(PlayerGui:FindFirstChild("Masters"))
-                        end)
-                    end
-                    return result
+    error("[Masters] Could not load Masters.rbxmx", 2)
+end
+
+local function findGui(root)
+    local mainFile = root:FindFirstChild("MainFile")
+    local server = mainFile and mainFile:FindFirstChild("Masters(Server)")
+    local components = server and server:FindFirstChild("Components")
+    local direct = components and components:FindFirstChild("Masters")
+    if direct and direct:IsA("ScreenGui") then return direct end
+
+    for _, obj in ipairs(root:GetDescendants()) do
+        if obj:IsA("ScreenGui") and obj:FindFirstChild("Handler", true) then
+            return obj
+        end
+    end
+end
+
+local function disableEmbeddedScripts(gui)
+    if not gui then return end
+    for _, obj in ipairs(gui:GetDescendants()) do
+        if obj:IsA("LocalScript") then
+            obj.Disabled = true
+            if obj.Name == "Handler" then obj:Destroy() end
+        end
+    end
+end
+
+local MastersRoot = loadRoot()
+local StorageFolder = MastersRoot:FindFirstChild("Masters(Storage)", true)
+local MastersGui = findGui(MastersRoot)
+local HandlerScript = MastersGui and MastersGui:FindFirstChild("Handler", true)
+
+if not StorageFolder then error("[Masters] Masters(Storage) not found", 2) end
+if not MastersGui then Warn("Game ScreenGui not found") end
+if not HandlerScript then Warn("Handler not found") end
+
+-- ============================================================
+--  UI HYDRATION / PERSONALIZATION
+-- ============================================================
+
+local function username()
+    return client.Name or "Player"
+end
+
+local function personalizeGui(gui)
+    if not gui then return end
+    for _, obj in ipairs(gui:GetDescendants()) do
+        if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+            local okText, text = pcall(function() return obj.Text end)
+            if okText and type(text) == "string" then
+                local lower = text:lower()
+                if lower == "river" or lower == "@river" then
+                    obj.Text = username()
                 end
             end
-            Log("Patched Main bar-state guard for mobile executor")
-        else
-            Warn("Unable to patch Main for mobile executor:", tostring(main))
         end
+    end
+
+    local userFrame = gui:FindFirstChild("User", true)
+    local display = userFrame and userFrame:FindFirstChild("Display", true)
+    if display and (display:IsA("TextLabel") or display:IsA("TextButton") or display:IsA("TextBox")) then
+        display.Text = username()
     end
 end
 
-
-local function QuarantineGuiScripts(gui)
+local function forceBarState(gui)
     if not gui then return end
-
-    for _, obj in gui:GetDescendants() do
-        if obj:IsA("LocalScript") then
-            -- The cloned ScreenGui already contains Handler. If it remains enabled
-            -- when parented to PlayerGui, it can run before __namecall is hooked
-            -- and before mock handlers are registered. That race can call real
-            -- remotes / duplicate Handler and crash executors.
-            obj.Disabled = true
-            if obj.Name == "Handler" then
-                obj:Destroy()
-            end
-        end
-    end
-end
-
-local function GetMobileGuiBits(gui)
-    local interface = gui and gui:FindFirstChild("Interface", true)
+    local interface = gui:FindFirstChild("Interface", true)
     local frame = interface and interface:FindFirstChild("Frame")
     local bar = frame and frame:FindFirstChild("Bar")
     local page = frame and frame:FindFirstChildWhichIsA("UIPageLayout")
-
-    return interface, frame, bar, page
-end
-
-local function ApplyMobileBarState(gui)
-    local interface, frame, bar, page = GetMobileGuiBits(gui)
 
     if interface and interface:IsA("GuiObject") then
         interface:SetAttribute("State", "Bar")
@@ -626,318 +403,70 @@ local function ApplyMobileBarState(gui)
         interface.Position = UDim2.fromScale(0.5, 0.5)
         interface.Size = UDim2.fromOffset(300, 120)
         interface.ImageTransparency = 0.8
-    end
-
-    if frame then
-        pcall(function() frame.Modal = false end)
-    end
-
-    if page and bar then
-        pcall(function() page:JumpTo(bar) end)
-    end
-end
-
-local function ApplyUserPersonalization(gui)
-    if not gui then return end
-
-    local username = GetLocalUsername()
-
-    for _, obj in gui:GetDescendants() do
-        if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
-            local ok, current = pcall(function() return obj.Text end)
-            if ok and type(current) == "string" and current:lower() == "river" then
-                pcall(function() obj.Text = username end)
-            end
-        end
-    end
-
-    local sidebarUser = gui:FindFirstChild("User", true)
-    if sidebarUser then
-        local display = sidebarUser:FindFirstChild("Display", true)
-        if display and (display:IsA("TextLabel") or display:IsA("TextButton") or display:IsA("TextBox")) then
-            display.Text = username
-        end
-    end
-end
-
-local function HydrateRuntimeUi(gui)
-    if not gui then return end
-
-    ApplyUserPersonalization(gui)
-
-    local interface = gui:FindFirstChild("Interface", true)
-    if interface and interface:IsA("GuiObject") then
-        interface.Interactable = true
         interface.Active = true
+        pcall(function() interface.Interactable = true end)
     end
+    if frame then pcall(function() frame.Modal = false end) end
+    if page and bar then pcall(function() page:JumpTo(bar) end) end
+end
 
-    for _, obj in gui:GetDescendants() do
+local function hydrateGui(gui)
+    if not gui then return end
+    personalizeGui(gui)
+    for _, obj in ipairs(gui:GetDescendants()) do
         if obj:IsA("GuiObject") then
-            pcall(function() obj.Interactable = true end)
             pcall(function() obj.Active = true end)
-
+            pcall(function() obj.Interactable = true end)
             if obj:IsA("GuiButton") then
                 pcall(function() obj.Selectable = true end)
                 pcall(function() obj.AutoButtonColor = true end)
             end
-
-            local lowerName = obj.Name:lower()
-            if lowerName == "loading" or lowerName == "throbber" or lowerName == "spinner" then
+            local lower = obj.Name:lower()
+            if lower == "loading" or lower == "spinner" or lower == "throbber" then
                 pcall(function() obj.Visible = false end)
             end
         end
     end
 end
 
-local function ApplyMobileGuiPatches(gui)
-    if not MOBILE_EXECUTOR or not gui then return end
-
-    -- Hide the raw cloned ScreenGui first. The rbmx can briefly display its
-    -- default/full page before Handler calls Main.SetState("Bar"), which is the
-    -- flash users saw right before the app crashed.
-    gui.Enabled = false
-
-    pcall(function() gui.IgnoreGuiInset = false end)
-    pcall(function() gui.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets end)
-    pcall(function() gui.ClipToDeviceSafeArea = false end)
-
-    ApplyMobileBarState(gui)
-    ApplyUserPersonalization(gui)
-    Log("Prepared mobile-safe bar startup")
-end
-
-local function RevealMobileStartupBar(gui)
-    if not MOBILE_EXECUTOR or not gui then return end
-
-    task.delay(CONFIG.MOBILE_STARTUP_REVEAL_DELAY, function()
-        if not gui or not gui.Parent then return end
-
-        ApplyMobileBarState(gui)
-        HydrateRuntimeUi(gui)
-        gui.Enabled = true
-        Log("Revealed mobile startup bar")
-    end)
-end
-
-local function ApplyMobileModulePatches(storageRoot)
-    if not storageRoot then return end
-
-    local modules = storageRoot:FindFirstChild("Modules")
-    if not modules then return end
-
-    local utilitiesModule = modules:FindFirstChild("Utilities")
-    if utilitiesModule then
-        local ok, utilities = pcall(require, utilitiesModule)
-        if ok and type(utilities) == "table" then
-            utilities.GetViewportRatio = function()
-                return 0
-            end
-            utilities.Haptic = function() end
-            Log("Patched Utilities for mobile executor")
-        else
-            Warn("Unable to patch Utilities for mobile executor:", tostring(utilities))
-        end
-    end
-
-    local audiosModule = modules:FindFirstChild("Audios")
-    if audiosModule then
-        local ok, audios = pcall(require, audiosModule)
-        if ok and type(audios) == "table" then
-            local mobileAudiosLoaded = false
-
-            audios.GetAudioMetadataAsync = function(assetIds)
-                return GetLocalAudioMetadata(assetIds)
-            end
-
-            audios.LoadAudios = function(container)
-                task.spawn(function()
-                    local index = 1
-                    local chunk = {}
-                    local chunkSize = CONFIG.MOBILE_AUDIO_CHUNK_SIZE
-                    local chunkDelay = CONFIG.MOBILE_AUDIO_CHUNK_DELAY
-
-                    for _, entry in LOCAL_AUDIO_LIBRARY do
-                        table.insert(chunk, CloneLocalAudioEntry(entry))
-
-                        if #chunk >= chunkSize then
-                            if container then container[index] = chunk end
-                            pcall(function() audios.ChunkLoaded:Fire(index, chunk) end)
-
-                            index += 1
-                            chunk = {}
-                            task.wait(chunkDelay)
-                        end
-                    end
-
-                    if #chunk > 0 then
-                        if container then container[index] = chunk end
-                        pcall(function() audios.ChunkLoaded:Fire(index, chunk) end)
-                        task.wait(chunkDelay)
-                    end
-
-                    mobileAudiosLoaded = true
-                    pcall(function() audios.ChunkLoadingFinished:Fire() end)
-                end)
-            end
-
-            audios.IsLoaded = function()
-                return mobileAudiosLoaded
-            end
-            Log("Patched local Audios metadata/loader for mobile executor")
-        else
-            Warn("Unable to patch Audios for mobile executor:", tostring(audios))
-        end
-    end
-
-    local mainModule = modules:FindFirstChild("Main")
-    if mainModule then
-        local ok, main = pcall(require, mainModule)
-        if ok and type(main) == "table" and type(main.Fullscreen) == "function" then
-            local originalSetState = main.SetState
-            if type(originalSetState) == "function" and not main.__MastersMobileExecutorPatched then
-                main.__MastersMobileExecutorPatched = true
-                main.SetState = function(state)
-                    local result = originalSetState(state)
-                    if state == "Bar" then
-                        task.defer(function()
-                            ApplyMobileBarState(PlayerGui:FindFirstChild("Masters"))
-                        end)
-                    end
-                    return result
-                end
-            end
-            Log("Patched Main bar-state guard for mobile executor")
-        else
-            Warn("Unable to patch Main for mobile executor:", tostring(main))
-        end
-    end
-end
-
-
 -- ============================================================
---  MOBILE GUI PATCHES
+--  INJECT STORAGE / GUI
 -- ============================================================
 
-local function ApplyMobileGuiPatches(gui)
-    if not MOBILE_EXECUTOR or not gui then return end
-    pcall(function() gui.IgnoreGuiInset = false end)
-    pcall(function() gui.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets end)
-    pcall(function() gui.ClipToDeviceSafeArea = false end)
+local oldStorage = ReplicatedStorage:FindFirstChild("Masters(Storage)")
+if oldStorage then oldStorage:Destroy() end
+local StorageClone = StorageFolder:Clone()
+StorageClone.Parent = ReplicatedStorage
 
-    local interface = gui:FindFirstChild("Interface", true)
-    if interface and interface:IsA("GuiObject") then
-        interface.AnchorPoint = Vector2.new(0.5, 0.5)
-        interface.Position    = UDim2.fromScale(0.5, 0.5)
-        interface.Size        = UDim2.fromScale(1, 1)
-
-        local scale = interface:FindFirstChild("MobileExecutorScale")
-        if not scale then
-            scale      = Instance.new("UIScale")
-            scale.Name = "MobileExecutorScale"
-            scale.Parent = interface
-        end
-        scale.Scale = 1
-    end
-    Log("Applied mobile-safe GUI defaults")
-end
-
-local function RevealMobileStartupBar(gui)
-    if not gui then return end
-    pcall(function()
-        for _, name in {"StartupBar","MobileBar","LoadingBar","SplashScreen","Splash"} do
-            local obj = gui:FindFirstChild(name, true)
-            if obj and obj:IsA("GuiObject") then
-                obj.Visible = true
-            end
-        end
-    end)
-end
-
--- ============================================================
---  MOBILE MODULE PATCHES
--- ============================================================
+local oldGui = PlayerGui:FindFirstChild("Masters")
+if oldGui then oldGui:Destroy() end
 
 local GuiClone
 if MastersGui then
     GuiClone = MastersGui:Clone()
-    QuarantineGuiScripts(GuiClone)
-    ApplyMobileGuiPatches(GuiClone)
+    GuiClone.Enabled = false
+    disableEmbeddedScripts(GuiClone)
+    forceBarState(GuiClone)
+    personalizeGui(GuiClone)
     GuiClone.Parent = PlayerGui
-    Log("Injected ScreenGui →", GuiClone.Name)
 end
 
-    local modules = storageRoot:FindFirstChild("Modules")
-    if not modules then return end
-
-    local utilitiesModule = modules:FindFirstChild("Utilities")
-    if utilitiesModule then
-        local ok, utilities = pcall(require, utilitiesModule)
-        if ok and type(utilities) == "table" then
-            utilities.GetViewportRatio = function() return 0 end
-            utilities.Haptic           = function() end
-            Log("Patched Utilities ✓")
-        else
-            Warn("Cannot patch Utilities:", tostring(utilities))
-        end
-    end
-
-    local audiosModule = modules:FindFirstChild("Audios")
-    if audiosModule then
-        local ok, audios = pcall(require, audiosModule)
-        if ok and type(audios) == "table" then
-            audios.LoadAudios = function()
-                task.defer(function()
-                    pcall(function() audios.ChunkLoadingFinished:Fire() end)
-                end)
-            end
-            audios.IsLoaded = function() return true end
-            Log("Patched Audios ✓")
-        else
-            Warn("Cannot patch Audios:", tostring(audios))
-        end
-    end
-
-    local mainModule = modules:FindFirstChild("Main")
-    if mainModule then
-        local ok, main = pcall(require, mainModule)
-        if ok and type(main) == "table"
-           and type(main.SetState) == "function"
-           and not main.__MastersMobileExecutorPatched then
-            main.__MastersMobileExecutorPatched = true
-            local originalSetState = main.SetState
-            main.SetState = function(state)
-                local result = originalSetState(state)
-                if state == "Full" then
-                    task.defer(function()
-                        pcall(function() main.Fullscreen(true) end)
-                        pcall(function() main.Sidebar(false) end)
-                    end)
-                end
-                return result
-            end
-            Log("Patched Main ✓")
-        else
-            Warn("Cannot patch Main:", tostring(main))
-        end
-    end
-end
-
-
+local storage = ReplicatedStorage:WaitForChild("Masters(Storage)", 15)
+local events = storage and storage:WaitForChild("Events", 10)
 
 -- ============================================================
---  MOCK EVENT HANDLERS  (path → function)
+--  REMOTE MOCKS
 -- ============================================================
 
 local MockInvoke = {}
-local MockFire   = {}
+local MockFire = {}
+local eventsFullPath = events and events:GetFullName() or ""
+local eventsPathLen = #eventsFullPath
 
-local function OnInvoke(path, fn) MockInvoke[path] = fn end
-local function OnFire(path, fn)   MockFire[path]   = fn end
-
-local function BuildDefaultLibraryResponse()
-    local songs = {}
-    for _, id in GetLocalAudioIds() do
-        table.insert(songs, id)
+local function relativePath(instance)
+    local full = instance:GetFullName()
+    if eventsFullPath ~= "" and full:sub(1, eventsPathLen) == eventsFullPath then
+        return full:sub(eventsPathLen + 2)
     end
 
     return {
@@ -947,596 +476,268 @@ local function BuildDefaultLibraryResponse()
     }
 end
 
-local function DefaultMockInvoke(path, ...)
+local function onInvoke(path, fn) MockInvoke[path] = fn end
+local function onFire(path, fn) MockFire[path] = fn end
+
+local function libraryResponse()
+    return {
+        Songs = LocalData.Library.Songs or localAudioIds(),
+        Artists = LocalData.Library.Artists or { "Roblox" },
+        Playlists = LocalData.Library.Playlists or {},
+    }
+end
+
+local function defaultInvoke(path, ...)
     local lower = tostring(path or ""):lower()
+    local args = { ... }
 
     if lower:find("check") and lower:find("version") then return true, CONFIG.FAKE_VERSION end
     if lower:find("version") then return CONFIG.FAKE_VERSION end
     if lower:find("settings") then return LocalData.Settings end
     if lower:find("preference") then return LocalData.Preferences end
     if lower:find("algorithm") then return LocalData.Algorithm end
-    if lower:find("library") and lower:find("fetch") then return BuildDefaultLibraryResponse() end
-    if lower:find("playlist") and lower:find("get") then return {} end
+    if lower:find("library") and lower:find("fetch") then return libraryResponse() end
     if lower:find("configuration") then return LocalData.Configuration end
     if lower:find("localstations") then return LocalData.LocalStations end
-    if lower:find("stationsindex") or lower:find("onlinestations") then return {} end
+    if lower:find("stations") then return {} end
+    if lower:find("filter") then return args[2] or args[1] or "" end
     if lower:find("listener") then return {} end
-    if lower:find("filter") then
-        local args = { ... }
-        return args[2] or args[1] or ""
-    end
+    if lower:find("playlist") and lower:find("get") then return {} end
     if lower:find("session") then return nil end
     if lower:find("share") then return false, "Disabled" end
-
     if lower:find("is") or lower:find("has") or lower:find("can") then return false end
     if lower:find("create") or lower:find("set") or lower:find("add") or lower:find("copy")
         or lower:find("delete") or lower:find("pin") or lower:find("update")
         or lower:find("complete") or lower:find("ready") then
         return true
     end
-    if lower:find("get") or lower:find("fetch") or lower:find("load") or lower:find("search") then
-        return {}
-    end
-
+    if lower:find("get") or lower:find("fetch") or lower:find("load") or lower:find("search") then return {} end
     return true
 end
 
-local function DefaultMockFire(path, ...)
+local function defaultFire()
     return true
 end
 
-local function CreateMockTextFilterResult(text)
-    local result = {}
+-- Version / onboarding / settings
+onInvoke("Main.GetVersion", function() return CONFIG.FAKE_VERSION end)
+onInvoke("Main.FetchVersion", function() return CONFIG.FAKE_VERSION end)
+onInvoke("Main.CheckVersion", function() return true, CONFIG.FAKE_VERSION end)
+onInvoke("Main.Version", function() return CONFIG.FAKE_VERSION end)
+onInvoke("Main.VersionCheck", function() return true, CONFIG.FAKE_VERSION end)
+onInvoke("Main.UpdateCheck", function() return true, CONFIG.FAKE_VERSION end)
+onInvoke("Main.IsUpToDate", function() return true end)
+onInvoke("Main.GetLatestVersion", function() return CONFIG.FAKE_VERSION end)
+onInvoke("Main.Setup.GetVersion", function() return CONFIG.FAKE_VERSION end)
+onInvoke("Main.Onboarding.GetVersion", function() return CONFIG.FAKE_VERSION end)
+onInvoke("Main.Onboarding.GetStatus", function() return true, "complete" end)
+onInvoke("Main.Onboarding.IsComplete", function() return true end)
+onInvoke("Main.Onboarding.GetStep", function() return "complete" end)
+onInvoke("Main.Setup.GetStatus", function() return true, "ready" end)
+onInvoke("Main.Setup.IsReady", function() return true end)
+onInvoke("Main.ServerReady", function() return true end)
+onInvoke("Main.GameReady", function() return true end)
+onFire("Main.Onboarding.SetupComplete", function() end)
+onFire("Main.Onboarding.Complete", function() end)
+onFire("Main.Setup.RunGame", function() end)
+onFire("Main.ServerReady", function() end)
 
-    function result:GetChatForUserAsync()
-        return text or ""
+onInvoke("Main.Settings.FetchSettings", function() return LocalData.Settings end)
+onInvoke("Modules.Settings.FetchSettings", function() return LocalData.Settings end)
+onFire("Main.Settings.SetSettings", function(newSettings)
+    if type(newSettings) == "table" then
+        for key, value in pairs(newSettings) do LocalData.Settings[key] = value end
+        saveData()
     end
+end)
 
-    function result:GetNonChatStringForBroadcastAsync()
-        return text or ""
+onInvoke("Main.Algorithm.FetchAlgorithm", function() return LocalData.Algorithm end)
+onInvoke("Main.Library.FetchLibrary", libraryResponse)
+onInvoke("Main.Preferences.FetchPreference", function() return LocalData.Preferences end)
+onInvoke("Modules.Configuration.GetConfiguration", function() return LocalData.Configuration end)
+onInvoke("Modules.Configuration.GetConfigurationServer", function() return LocalData.Configuration end)
+onInvoke("Modules.Configuration.GetLocalStations", function() return LocalData.LocalStations end)
+onInvoke("Modules.Configuration.GetLocalStationsServer", function() return LocalData.LocalStations end)
+onInvoke("Modules.OnlineStations.GetStationsIndex", function() return {} end)
+onInvoke("Modules.TextFiltering.FilterText", function(_, text) return text end)
+onInvoke("Modules.Listeners.GetListeners", function() return {} end)
+onInvoke("Modules.Listeners.GetCurrentTimestamp", function() return 0 end)
+onInvoke("Main.SessionSaving.FetchSavedSession", function() return nil end)
+onFire("Main.SessionSaving.SetPlaybackState", function() end)
+
+-- Common library/preference mutations
+onInvoke("Main.Library.SetSong", function(songId, add)
+    local songs = LocalData.Library.Songs
+    if add then
+        if not table.find(songs, songId) then table.insert(songs, songId) end
+    else
+        local idx = table.find(songs, songId)
+        if idx then table.remove(songs, idx) end
     end
-
-    function result:GetNonChatStringForUserAsync()
-        return text or ""
+    saveData()
+    return true
+end)
+onInvoke("Main.Library.IsSongSaved", function(songId) return table.find(LocalData.Library.Songs, songId) ~= nil end)
+onInvoke("Main.Library.SetArtist", function(artist, add)
+    local artists = LocalData.Library.Artists
+    if add then
+        if not table.find(artists, artist) then table.insert(artists, artist) end
+    else
+        local idx = table.find(artists, artist)
+        if idx then table.remove(artists, idx) end
     end
+    saveData()
+    return true
+end)
+onInvoke("Main.Library.IsArtistSaved", function(artist) return table.find(LocalData.Library.Artists, artist) ~= nil end)
+onInvoke("Main.Library.GetPlaylists", function() return {} end)
+onInvoke("Main.Library.IsPinned", function() return false end)
+onFire("Main.Library.Pin", function() end)
+onFire("Main.Library.DeletePlaylist", function() end)
 
-    return result
+onInvoke("Main.Preferences.FavoriteSong", function(songId, add)
+    local list = LocalData.Preferences.Songs.Favorite
+    local idx = table.find(list, songId)
+    if add and not idx then table.insert(list, songId) elseif (not add) and idx then table.remove(list, idx) end
+    saveData()
+    return true
+end)
+onInvoke("Main.Preferences.IsSongFavorite", function(songId) return table.find(LocalData.Preferences.Songs.Favorite, songId) ~= nil end)
+onInvoke("Main.Preferences.DislikeSong", function(songId, add)
+    local list = LocalData.Preferences.Songs.Dislike
+    local idx = table.find(list, songId)
+    if add and not idx then table.insert(list, songId) elseif (not add) and idx then table.remove(list, idx) end
+    saveData()
+    return true
+end)
+onInvoke("Main.Preferences.IsSongDislike", function(songId) return table.find(LocalData.Preferences.Songs.Dislike, songId) ~= nil end)
+onInvoke("Main.Preferences.BlockArtist", function(artist, add)
+    local list = LocalData.Preferences.Artists.Block
+    local idx = table.find(list, artist)
+    if add and not idx then table.insert(list, artist) elseif (not add) and idx then table.remove(list, idx) end
+    saveData()
+    return true
+end)
+onInvoke("Main.Preferences.IsArtistBlock", function(artist) return table.find(LocalData.Preferences.Artists.Block, artist) ~= nil end)
+
+-- ============================================================
+--  ENGINE / SERVICE MOCKS
+-- ============================================================
+
+local function textFilterResult(text)
+    local object = {}
+    function object:GetChatForUserAsync() return text or "" end
+    function object:GetNonChatStringForBroadcastAsync() return text or "" end
+    function object:GetNonChatStringForUserAsync() return text or "" end
+    return object
 end
 
-local function UniversalServiceFallback(self, method, ...)
+local function serviceFallback(method, ...)
     local lower = tostring(method or ""):lower()
-
     if lower:find("async") then
-        if lower:find("badge") or lower:find("owns") or lower:find("can") or lower:find("is") then
-            return false
-        end
-        if lower:find("info") then
-            return {}
-        end
-        if lower:find("thumbnail") then
-            return "rbxthumb://type=AvatarHeadShot&id=" .. tostring(client.UserId) .. "&w=150&h=150", true
-        end
+        if lower:find("badge") or lower:find("owns") or lower:find("can") or lower:find("is") then return false end
+        if lower:find("thumbnail") then return "rbxthumb://type=AvatarHeadShot&id=" .. tostring(client.UserId) .. "&w=150&h=150", true end
+        if lower:find("info") then return {} end
         return {}
     end
-
     if lower:sub(1, 3) == "get" then
-        if lower:find("mouse") or lower:find("position") or lower:find("inset") then
-            return Vector2.zero, Vector2.zero
-        end
-        if lower:find("thumbnail") then
-            return "rbxthumb://type=AvatarHeadShot&id=" .. tostring(client.UserId) .. "&w=150&h=150", true
-        end
-        if lower:find("name") then return GetLocalUsername() end
+        if lower:find("mouse") or lower:find("position") or lower:find("inset") then return Vector2.zero, Vector2.zero end
+        if lower:find("thumbnail") then return "rbxthumb://type=AvatarHeadShot&id=" .. tostring(client.UserId) .. "&w=150&h=150", true end
+        if lower:find("name") then return username() end
         if lower:find("id") then return client.UserId end
         return {}
     end
-
     if lower:sub(1, 3) == "set" or lower:find("prompt") or lower:find("teleport")
         or lower:find("preload") or lower:find("award") or lower:find("vibrate")
         or lower:find("send") then
         return nil
     end
-
     return nil
 end
 
--- ============================================================
---  HANDLERS
--- ============================================================
-
--- ── VERSION / UPDATE ──────────────────────────────────────
-local function FakeVer()      return CONFIG.FAKE_VERSION end
-local function FakeVerCheck() return true, CONFIG.FAKE_VERSION end
-
-OnInvoke("Main.GetVersion",            FakeVer)
-OnInvoke("Main.FetchVersion",          FakeVer)
-OnInvoke("Main.CheckVersion",          FakeVerCheck)
-OnInvoke("Main.Version",               FakeVer)
-OnInvoke("Main.VersionCheck",          FakeVerCheck)
-OnInvoke("Main.UpdateCheck",           FakeVerCheck)
-OnInvoke("Main.IsUpToDate",            function() return true end)
-OnInvoke("Main.GetLatestVersion",      FakeVer)
-OnInvoke("Main.Setup.GetVersion",      FakeVer)
-OnInvoke("Main.Onboarding.GetVersion", FakeVer)
-
--- ── ONBOARDING ────────────────────────────────────────────
-OnInvoke("Main.Onboarding.GetStatus",  function() return true, "complete" end)
-OnInvoke("Main.Onboarding.IsComplete", function() return true end)
-OnInvoke("Main.Onboarding.GetStep",    function() return "complete" end)
-OnInvoke("Main.Setup.GetStatus",       function() return true, "ready" end)
-OnInvoke("Main.Setup.IsReady",         function() return true end)
-OnInvoke("Main.ServerReady",           function() return true end)
-OnInvoke("Main.GameReady",             function() return true end)
-OnFire("Main.Onboarding.SetupComplete", function() end)
-OnFire("Main.Onboarding.Complete",      function() end)
-OnFire("Main.Onboarding.Finish",        function() end)
-OnFire("Main.Setup.RunGame",            function() end)
-OnFire("Main.Setup.Complete",           function() end)
-OnFire("Main.ServerReady",              function() end)
-OnFire("Main.GameReady",                function() end)
-
--- ── SETTINGS ──────────────────────────────────────────────
-OnInvoke("Main.Settings.FetchSettings",    function() return LocalData.Settings end)
-OnInvoke("Modules.Settings.FetchSettings", function() return LocalData.Settings end)
-OnFire("Main.Settings.SetSettings", function(newSettings)
-    if type(newSettings) ~= "table" then return end
-    for k, v in newSettings do LocalData.Settings[k] = v end
-    SaveData()
-end)
-
--- ── ALGORITHM ─────────────────────────────────────────────
-OnInvoke("Main.Algorithm.FetchAlgorithm", function() return LocalData.Algorithm end)
-
--- ── LIBRARY ───────────────────────────────────────────────
-OnInvoke("Main.Library.FetchLibrary", function()
-    return {
-        Songs     = LocalData.Library.Songs,
-        Artists   = LocalData.Library.Artists,
-        Playlists = LocalData.Library.Playlists,
-    }
-end)
-
-OnInvoke("Main.Library.SetSong", function(songId, add)
-    if add then
-        if not table.find(LocalData.Library.Songs, songId) then
-            table.insert(LocalData.Library.Songs, songId)
-        end
-    else
-        local idx = table.find(LocalData.Library.Songs, songId)
-        if idx then table.remove(LocalData.Library.Songs, idx) end
-    end
-    SaveData()
-    return true, add and "Added" or "Removed"
-end)
-
-OnInvoke("Main.Library.IsSongSaved", function(songId)
-    return table.find(LocalData.Library.Songs, songId) ~= nil
-end)
-
-OnInvoke("Main.Library.SetArtist", function(artistName, add)
-    if add then
-        if not table.find(LocalData.Library.Artists, artistName) then
-            table.insert(LocalData.Library.Artists, artistName)
-        end
-    else
-        local idx = table.find(LocalData.Library.Artists, artistName)
-        if idx then table.remove(LocalData.Library.Artists, idx) end
-    end
-    SaveData()
-    return true, add and "Added" or "Removed"
-end)
-
-OnInvoke("Main.Library.IsArtistSaved", function(artistName)
-    return table.find(LocalData.Library.Artists, artistName) ~= nil
-end)
-
-OnInvoke("Main.Library.IsPinned", function() return false end)
-OnFire("Main.Library.Pin",        function() end)
-
-OnInvoke("Main.Library.GetPlaylists", function()
-    local result = {}
-    for _, data in LocalData.Library.Playlists do
-        table.insert(result, data)
-    end
-    return result
-end)
-
-OnInvoke("Main.Library.GetPlaylistIdByName", function(name)
-    for id, data in LocalData.Library.Playlists do
-        if data.Name == name then return id end
-    end
-    return nil
-end)
-
-OnInvoke("Main.Library.GetPlaylistByPlaylistId", function(creatorId, playlistId)
-    return LocalData.Library.Playlists[playlistId]
-end)
-
--- FIX v6: Handler passes {Name=..., Private=...} table, not a plain string
-OnInvoke("Main.Library.CreatePlaylist", function(nameOrData)
-    local id   = "LOCAL_" .. tostring(math.floor(tick() * 1000))
-    local name = (type(nameOrData) == "table" and nameOrData.Name)
-              or (type(nameOrData) == "string" and nameOrData)
-              or "New Playlist"
-    LocalData.Library.Playlists[id] = {
-        PlaylistId = id,
-        Name       = name,
-        Songs      = {},
-        Private    = (type(nameOrData) == "table" and nameOrData.Private) or false,
-        CreatorId  = client.UserId,
-    }
-    SaveData()
-    return true, id
-end)
-
-OnInvoke("Main.Library.SetSongToPlaylist", function(playlistId, songId, add)
-    local playlist = LocalData.Library.Playlists[playlistId]
-    if not playlist then return false, "Not found" end
-    if add then
-        if not table.find(playlist.Songs, songId) then
-            table.insert(playlist.Songs, songId)
-        end
-    else
-        local idx = table.find(playlist.Songs, songId)
-        if idx then table.remove(playlist.Songs, idx) end
-    end
-    SaveData()
-    return true, add and "Added" or "Removed"
-end)
-
-OnInvoke("Main.Library.SetPlaylistProperty", function(playlistId, property, value)
-    local playlist = LocalData.Library.Playlists[playlistId]
-    if not playlist then return false end
-    playlist[property] = value
-    SaveData()
-    return true
-end)
-
-OnInvoke("Main.Library.AddPublicPlaylist", function(creatorId, playlistId)
-    if not LocalData.Library.Playlists[playlistId] then
-        LocalData.Library.Playlists[playlistId] = {
-            PlaylistId = playlistId, Name = "Shared Playlist",
-            Songs = {}, Private = false, CreatorId = creatorId,
-        }
-        SaveData()
-    end
-    return true
-end)
-
-OnFire("Main.Library.DeletePlaylist", function(playlistId)
-    LocalData.Library.Playlists[playlistId] = nil
-    SaveData()
-end)
-
-OnInvoke("Main.Library.CopyOnlineStation", function() return true, "Copied" end)
-OnInvoke("Main.Library.CopyLocalStation",  function() return true, "Copied" end)
-
--- ── PREFERENCES ───────────────────────────────────────────
-OnInvoke("Main.Preferences.FetchPreference", function() return LocalData.Preferences end)
-
-OnInvoke("Main.Preferences.FavoriteSong", function(songId, add)
-    if add then
-        if not table.find(LocalData.Preferences.Songs.Favorite, songId) then
-            table.insert(LocalData.Preferences.Songs.Favorite, songId)
-        end
-    else
-        local idx = table.find(LocalData.Preferences.Songs.Favorite, songId)
-        if idx then table.remove(LocalData.Preferences.Songs.Favorite, idx) end
-    end
-    SaveData()
-    return true, add and "Favorited" or "Unfavorited"
-end)
-
-OnInvoke("Main.Preferences.IsSongFavorite", function(songId)
-    return table.find(LocalData.Preferences.Songs.Favorite, songId) ~= nil
-end)
-
-OnInvoke("Main.Preferences.DislikeSong", function(songId, add)
-    if add then
-        if not table.find(LocalData.Preferences.Songs.Dislike, songId) then
-            table.insert(LocalData.Preferences.Songs.Dislike, songId)
-        end
-    else
-        local idx = table.find(LocalData.Preferences.Songs.Dislike, songId)
-        if idx then table.remove(LocalData.Preferences.Songs.Dislike, idx) end
-    end
-    SaveData()
-    return true, add and "Disliked" or "Undisliked"
-end)
-
-OnInvoke("Main.Preferences.IsSongDislike", function(songId)
-    return table.find(LocalData.Preferences.Songs.Dislike, songId) ~= nil
-end)
-
-OnInvoke("Main.Preferences.BlockArtist", function(artistName, add)
-    if add then
-        if not table.find(LocalData.Preferences.Artists.Block, artistName) then
-            table.insert(LocalData.Preferences.Artists.Block, artistName)
-        end
-    else
-        local idx = table.find(LocalData.Preferences.Artists.Block, artistName)
-        if idx then table.remove(LocalData.Preferences.Artists.Block, idx) end
-    end
-    SaveData()
-    return true, add and "Blocked" or "Unblocked"
-end)
-
-OnInvoke("Main.Preferences.IsArtistBlock", function(artistName)
-    return table.find(LocalData.Preferences.Artists.Block, artistName) ~= nil
-end)
-
--- ── SHARING ───────────────────────────────────────────────
-OnInvoke("Main.Sharing.Share",              function() return false, "Disabled" end)
-OnInvoke("Main.Sharing.IsShared",           function() return false end)
-OnInvoke("Main.Sharing.FetchSharedWithYou", function() return {} end)
-
--- ── SESSION SAVING ────────────────────────────────────────
-OnInvoke("Main.SessionSaving.FetchSavedSession", function() return nil end)
-OnFire("Main.SessionSaving.SetPlaybackState",    function() end)
-
--- ── LISTENERS ─────────────────────────────────────────────
-OnInvoke("Modules.Listeners.GetListeners",        function() return {} end)
-OnInvoke("Modules.Listeners.GetCurrentTimestamp", function() return 0  end)
-OnFire("Modules.Listeners.UpdateListener",        function() end)
-
--- ── TEXT FILTERING ────────────────────────────────────────
-OnInvoke("Modules.TextFiltering.FilterText", function(mode, text) return text end)
-
--- ── CONFIGURATION ─────────────────────────────────────────
-OnInvoke("Modules.Configuration.GetConfiguration",       function() return LocalData.Configuration end)
-OnInvoke("Modules.Configuration.GetConfigurationServer", function() return LocalData.Configuration end)
-OnInvoke("Modules.Configuration.GetLocalStations",       function() return LocalData.LocalStations  end)
-OnInvoke("Modules.Configuration.GetLocalStationsServer", function() return LocalData.LocalStations  end)
-
--- ── ONLINE STATIONS ───────────────────────────────────────
-OnInvoke("Modules.OnlineStations.GetStationsIndex", function()
-    local ok, result = pcall(function()
-        local apiKey  = "AIzaSyAZkUG43dtTWV1L0kKZxyb_PeT9x5RlDsY"
-        local sheetId = "1iJRuAArdm2fSobb0R1T4pLdaEKyyseqSsRhpyD9D7cA"
-        local url = ("https://sheets.googleapis.com/v4/spreadsheets/%s/values/e1?key=%s"):format(sheetId, apiKey)
-        return HttpService:JSONDecode(HttpService:GetAsync(url))
-    end)
-    return ok and result or {}
-end)
-
--- ============================================================
---  INSTANCE-KEYED LOOKUP TABLE  (built once after clone)
---
---  Thay vì hook tính GetFullName() + string ops mỗi lần,
---  ta walk Events tree 1 lần và map instance → handler.
---  Hook chỉ cần 1 table lookup O(1), không có string ops,
---  không có pcall, không có IsDescendantOf.
--- ============================================================
-
--- Populated after StorageClone is created (xem bên dưới)
-local RF_handlers = {}   -- [RemoteFunction instance] = fn
-local RE_handlers = {}   -- [RemoteEvent    instance] = fn
-
-local function BuildLookupTables(eventsFolder)
-    if not eventsFolder then
-        Warn("Events folder not found — hook will be no-op")
+local function hookServicesAndRemotes()
+    if not hookmetamethod then
+        Warn("hookmetamethod missing; remote mocking is limited")
         return
     end
 
-    -- Helper: tính relative path từ eventsFolder đến obj
-    -- Ví dụ: Events.Main.Settings.FetchSettings → "Main.Settings.FetchSettings"
-    local function RelPath(obj)
-        local parts = {}
-        local cur = obj
-        while cur and cur ~= eventsFolder do
-            table.insert(parts, 1, cur.Name)
-            cur = cur.Parent
-        end
-        if cur ~= eventsFolder then return nil end
-        return table.concat(parts, ".")
-    end
-
-    local rfCount, reCount = 0, 0
-
-    for _, obj in eventsFolder:GetDescendants() do
-        local path = RelPath(obj)
-        if path then
-            if obj:IsA("RemoteFunction") then
-                local handler = MockInvoke[path]
-                if handler then
-                    RF_handlers[obj] = handler
-                    rfCount += 1
-                    Log("RF mapped:", path)
-                else
-                    -- Unmocked RF: return nil silently
-                    RF_handlers[obj] = function()
-                        Warn("Unmocked RF called:", path)
-                        return nil
-                    end
-                end
-            elseif obj:IsA("RemoteEvent") then
-                local handler = MockFire[path]
-                if handler then
-                    RE_handlers[obj] = handler
-                    reCount += 1
-                    Log("RE mapped:", path)
-                else
-                    -- Unmocked RE: no-op silently
-                    RE_handlers[obj] = function()
-                        Warn("Unmocked RE called:", path)
-                    end
-                end
-            end
-        end
-    end
-
-    Log(("BuildLookupTables: %d RF + %d RE mapped"):format(rfCount, reCount))
-end
-
--- ============================================================
---  HOOK __namecall  — O(1) instance lookup, zero string ops
--- ============================================================
-
-if not hookmetamethod then
-    Warn("hookmetamethod not available — event mocking disabled.")
-else
-    local orig
-    orig = hookmetamethod(game, "__namecall", function(self, ...)
+    local original
+    original = hookmetamethod(game, "__namecall", function(self, ...)
         local method = getnamecallmethod()
+        local okDesc, isDesc = pcall(function() return self:IsDescendantOf(game) end)
+        if not okDesc or not isDesc then return original(self, ...) end
 
-        if self == AssetService and method == "GetAudioMetadataAsync" then
-            local assetIds = ...
-            return GetLocalAudioMetadata(assetIds)
-        end
-
-        if self == AssetService and method == "SearchAudio" then
-            return CreateLocalAudioPages()
-        end
-
-        if self == AssetService and method == "GetAudioMetadataAsync" then
-            local assetIds = ...
-            return GetLocalAudioMetadata(assetIds)
-        end
-
-        if self == AssetService and method == "SearchAudio" then
-            return CreateLocalAudioPages()
+        if self == AssetService then
+            if method == "GetAudioMetadataAsync" then return localAudioMetadata((...)) end
+            if method == "SearchAudio" then return localAudioPages() end
+            return serviceFallback(method, ...)
         end
 
         if self == Players then
             local first = ...
-            if method == "GetNameFromUserIdAsync" then
-                return tonumber(first) == client.UserId and client.Name or ("Player_" .. tostring(first))
-            elseif method == "GetUserIdFromNameAsync" then
-                return client.UserId
-            elseif method == "GetUserThumbnailAsync" then
-                return "rbxthumb://type=AvatarHeadShot&id=" .. tostring(first or client.UserId) .. "&w=150&h=150", true
-            elseif method == "GetPlayerByUserId" then
-                return tonumber(first) == client.UserId and client or nil
-            elseif method == "GetPlayers" then
-                return { client }
-            end
+            if method == "GetNameFromUserIdAsync" then return tonumber(first) == client.UserId and client.Name or ("Player_" .. tostring(first)) end
+            if method == "GetUserIdFromNameAsync" then return client.UserId end
+            if method == "GetUserThumbnailAsync" then return "rbxthumb://type=AvatarHeadShot&id=" .. tostring(first or client.UserId) .. "&w=150&h=150", true end
+            if method == "GetPlayerByUserId" then return tonumber(first) == client.UserId and client or nil end
+            if method == "GetPlayers" then return { client } end
+            return serviceFallback(method, ...)
         end
 
         if self == UserService and method == "GetUserInfosByUserIdsAsync" then
-            local userIds = ...
-            if type(userIds) ~= "table" then userIds = { client.UserId } end
-
+            local ids = (...)
+            if type(ids) ~= "table" then ids = { client.UserId } end
             local result = {}
-            for _, userId in userIds do
-                table.insert(result, {
-                    Id = userId,
-                    Username = tonumber(userId) == client.UserId and client.Name or ("Player_" .. tostring(userId)),
-                    DisplayName = tonumber(userId) == client.UserId and client.DisplayName or ("Player " .. tostring(userId)),
-                })
+            for _, id in ipairs(ids) do
+                table.insert(result, { Id = id, Username = tonumber(id) == client.UserId and client.Name or ("Player_" .. tostring(id)), DisplayName = tonumber(id) == client.UserId and client.DisplayName or ("Player " .. tostring(id)) })
             end
             return result
         end
 
         if self == MarketplaceService and method == "GetProductInfo" then
             local assetId = tonumber((...)) or 0
-            local meta = GetLocalAudioMetadata({ assetId })[1]
-            return {
-                AssetId = assetId,
-                Name = meta and meta.Title or ("Asset " .. tostring(assetId)),
-                Description = "Mocked asset metadata",
-                Creator = { Id = 1, Name = meta and meta.Artist or "Roblox", CreatorType = "User" },
-                AssetTypeId = 3,
-            }
+            local meta = localAudioMetadata({ assetId })[1]
+            return { AssetId = assetId, Name = meta.Title, Description = "Mocked asset", Creator = meta.Creator, AssetTypeId = 3 }
         end
 
         if self == PolicyService and method == "GetPolicyInfoForPlayerAsync" then
-            return {
-                AreAdsAllowed = false,
-                IsPaidRandomItemsRestricted = false,
-                AllowedExternalLinkReferences = {},
-                IsSubjectToChinaPolicies = false,
-            }
-        end
-
-        if self == HttpService then
-            if method == "GetAsync" then
-                return HttpService:JSONEncode({ values = {}, ok = true })
-            elseif method == "RequestAsync" then
-                return { Success = true, StatusCode = 200, Body = HttpService:JSONEncode({ ok = true }) }
-            elseif method == "PostAsync" then
-                return HttpService:JSONEncode({ ok = true })
-            end
-        end
-
-        if self == ContentProvider and method == "PreloadAsync" then
-            return nil
-        end
-
-        if self == HapticService then
-            return nil
-        end
-
-        if self == GuiService and method == "GetGuiInset" then
-            return Vector2.zero, Vector2.zero
+            return { AreAdsAllowed = false, IsPaidRandomItemsRestricted = false, AllowedExternalLinkReferences = {}, IsSubjectToChinaPolicies = false }
         end
 
         if self == TextService then
             local text = tostring((...) or "")
-            if method == "FilterStringAsync" then
-                return CreateMockTextFilterResult(text)
-            elseif method == "GetTextSize" then
-                return Vector2.new(math.max(#text * 8, 16), 18)
-            elseif method == "GetTextBoundsAsync" then
-                return Vector2.new(math.max(#text * 8, 16), 18)
-            end
-            return UniversalServiceFallback(self, method, ...)
+            if method == "FilterStringAsync" then return textFilterResult(text) end
+            if method == "GetTextSize" or method == "GetTextBoundsAsync" then return Vector2.new(math.max(#text * 8, 16), 18) end
+            return serviceFallback(method, ...)
         end
 
-        if self == UserInputService then
-            if method == "GetMouseLocation" then
-                return Vector2.zero
-            elseif method == "GetLastInputType" then
-                return Enum.UserInputType.Touch
-            elseif method == "IsKeyDown" or method == "IsMouseButtonPressed" then
-                return false
-            end
-            return UniversalServiceFallback(self, method, ...)
+        if self == HttpService then
+            if method == "GetAsync" or method == "PostAsync" then return HttpService:JSONEncode({ ok = true, values = {} }) end
+            if method == "RequestAsync" then return { Success = true, StatusCode = 200, Body = HttpService:JSONEncode({ ok = true }) } end
+            return serviceFallback(method, ...)
         end
 
-        if self == BadgeService then
-            if method == "UserHasBadgeAsync" then return false end
-            if method == "AwardBadge" then return nil end
-            return UniversalServiceFallback(self, method, ...)
-        end
-
-        if self == TeleportService then
-            return UniversalServiceFallback(self, method, ...)
-        end
-
-        if self == SocialService then
-            if method == "CanSendGameInviteAsync" then return false end
-            return UniversalServiceFallback(self, method, ...)
-        end
-
-        if self == AvatarEditorService then
-            if method == "GetAvatarRules" then return {} end
-            if method == "GetOutfitDetails" then return {} end
-            return UniversalServiceFallback(self, method, ...)
-        end
-
-        if self == GroupService then
-            if method == "GetGroupInfoAsync" then
-                return { Id = tonumber((...)) or 0, Name = "Mock Group", Owner = nil }
-            elseif method == "GetGroupsAsync" then
-                return {}
-            end
-            return UniversalServiceFallback(self, method, ...)
-        end
-
-        if self == StarterGui then
-            if method == "SetCore" then return nil end
-            if method == "GetCore" then return nil end
-            return UniversalServiceFallback(self, method, ...)
+        if self == ContentProvider or self == HapticService or self == GuiService or self == UserInputService
+            or self == BadgeService or self == TeleportService or self == SocialService or self == AvatarEditorService
+            or self == GroupService or self == StarterGui then
+            if self == GuiService and method == "GetGuiInset" then return Vector2.zero, Vector2.zero end
+            if self == UserInputService and method == "GetMouseLocation" then return Vector2.zero end
+            if self == UserInputService and method == "GetLastInputType" then return Enum.UserInputType.Touch end
+            if self == UserInputService and (method == "IsKeyDown" or method == "IsMouseButtonPressed") then return false end
+            if self == BadgeService and method == "UserHasBadgeAsync" then return false end
+            if self == SocialService and method == "CanSendGameInviteAsync" then return false end
+            if self == GroupService and method == "GetGroupInfoAsync" then return { Id = tonumber((...)) or 0, Name = "Mock Group" } end
+            return serviceFallback(method, ...)
         end
 
         if method == "InvokeServer" then
             local okRF, isRF = pcall(function() return self:IsA("RemoteFunction") end)
             if okRF and isRF then
-                local path    = GetRelativePath(self)
+                local path = relativePath(self)
                 local handler = MockInvoke[path]
-                if handler then
-                    Log("Intercepted InvokeServer:", path)
-                    return handler(...)
+                if handler then return handler(...) end
+                if events and self:IsDescendantOf(events) then
+                    Warn("Fallback InvokeServer:", path)
+                    return defaultInvoke(path, ...)
                 end
 
                 if events and self:IsDescendantOf(events) then
@@ -1544,15 +745,15 @@ else
                     return DefaultMockInvoke(path, ...)
                 end
             end
-
-        if method == "FireServer" then
+        elseif method == "FireServer" then
             local okRE, isRE = pcall(function() return self:IsA("RemoteEvent") end)
             if okRE and isRE then
-                local path    = GetRelativePath(self)
+                local path = relativePath(self)
                 local handler = MockFire[path]
-                if handler then
-                    Log("Intercepted FireServer:", path)
-                    handler(...)
+                if handler then handler(...); return end
+                if events and self:IsDescendantOf(events) then
+                    Warn("Fallback FireServer:", path)
+                    defaultFire(path, ...)
                     return
                 end
 
@@ -1564,93 +765,113 @@ else
             end
         end
 
-        if self == Players or self == UserService or self == MarketplaceService or self == PolicyService
-            or self == HttpService or self == ContentProvider or self == HapticService or self == GuiService
-            or self == TextService or self == UserInputService or self == BadgeService or self == TeleportService
-            or self == SocialService or self == AvatarEditorService or self == GroupService or self == StarterGui
-            or self == AssetService then
-            return UniversalServiceFallback(self, method, ...)
-        end
-
-        return orig(self, ...)
+        return original(self, ...)
     end)
-    Log("hookmetamethod installed ✓")
+
+    Log("__namecall hook installed")
 end
 
-ApplyMobileModulePatches(StorageClone)
+hookServicesAndRemotes()
 
 -- ============================================================
---  ẨN ONBOARDING UI
+--  MODULE PATCHES
 -- ============================================================
 
-task.spawn(function()
-    task.wait(1.5)
-    local mg = PlayerGui:FindFirstChild("Masters")
-    if not mg then return end
+local function patchModules()
+    local modules = storage and storage:FindFirstChild("Modules")
+    if not modules then return end
 
-    for _, name in {"Update","UpdateScreen","UpdateUI","UpdateRequired","Onboarding",
-                    "Setup","Welcome","Install","UpdateInstructions","Installation"} do
-        local frame = mg:FindFirstChild(name, true)
-        if frame and frame:IsA("GuiObject") then
-            frame.Visible = false
-            Log("Hidden:", name)
-        end
-    end
-
-    for _, btn in mg:GetDescendants() do
-        if btn:IsA("GuiButton") then
-            local nl = btn.Name:lower()
-            local tl = ""
-            pcall(function()
-                tl = (btn:FindFirstChildWhichIsA("TextLabel") or {Text=""}).Text:lower()
-            end)
-            for _, kw in {"rungame","run game","continue","finish","done","start"} do
-                if nl:find(kw) or tl:find(kw) then
-                    pcall(function() btn.MouseButton1Click:Fire() end)
-                    break
-                end
+    local utilitiesModule = modules:FindFirstChild("Utilities")
+    if utilitiesModule then
+        local ok, utilities = pcall(require, utilitiesModule)
+        if ok and type(utilities) == "table" then
+            utilities.GetViewportRatio = function() return 0 end
+            utilities.Haptic = function() end
+            utilities.GetPlayerThumbnail = function(userId)
+                return "rbxthumb://type=AvatarHeadShot&id=" .. tostring(userId or client.UserId) .. "&w=150&h=150"
             end
         end
     end
-end)
 
--- ============================================================
---  START HANDLER
--- ============================================================
+    local audiosModule = modules:FindFirstChild("Audios")
+    if audiosModule then
+        local ok, audios = pcall(require, audiosModule)
+        if ok and type(audios) == "table" then
+            local loaded = false
+            audios.GetAudioMetadataAsync = function(assetIds) return localAudioMetadata(assetIds) end
+            audios.LoadAudios = function(container)
+                task.spawn(function()
+                    local chunk = localAudioMetadata(localAudioIds())
+                    if container then container[1] = chunk end
+                    pcall(function() audios.ChunkLoaded:Fire(1, chunk) end)
+                    task.wait(CONFIG.AUDIO_CHUNK_DELAY)
+                    loaded = true
+                    pcall(function() audios.ChunkLoadingFinished:Fire() end)
+                end)
+            end
+            audios.IsLoaded = function() return loaded end
+            audios.SearchAudiosByKeyword = function()
+                local signal = audios.SearchedAudio or { Fire = function() end }
+                return { ChunkLoaded = signal, Advance = function() end, Results = localAudioMetadata(localAudioIds()), Finished = true }
+            end
+        end
+    end
 
-task.wait(0.5)
-
-if HandlerScript then
-    local clone = HandlerScript:Clone()
-    clone.Disabled = true
-    clone.Parent = GuiClone or PlayerGui
-    local ok, err = pcall(function() clone.Disabled = false end)
-    if not ok then Warn("Handler error:", err)
-    else Log("Handler started ✓") end
-else
-    Warn("Handler script not found in model.")
+    local mainModule = modules:FindFirstChild("Main")
+    if mainModule then
+        local ok, main = pcall(require, mainModule)
+        if ok and type(main) == "table" and type(main.SetState) == "function" and not main.__MastersCleanPatched then
+            main.__MastersCleanPatched = true
+            local originalSetState = main.SetState
+            main.SetState = function(state)
+                local result = originalSetState(state)
+                if state == "Bar" then task.defer(function() forceBarState(PlayerGui:FindFirstChild("Masters")) end) end
+                return result
+            end
+        end
+    end
 end
 
-RevealMobileStartupBar(GuiClone)
+patchModules()
 
-task.delay(2, function()
-    HydrateRuntimeUi(GuiClone)
+-- ============================================================
+--  START HANDLER / UI READY
+-- ============================================================
+
+task.wait(0.25)
+
+if HandlerScript then
+    local handler = HandlerScript:Clone()
+    handler.Disabled = true
+    handler.Parent = GuiClone or PlayerGui
+    local ok, err = pcall(function() handler.Disabled = false end)
+    if ok then Log("Handler started") else Warn("Handler start error:", err) end
+end
+
+task.delay(CONFIG.REVEAL_DELAY, function()
+    if GuiClone and GuiClone.Parent then
+        forceBarState(GuiClone)
+        hydrateGui(GuiClone)
+        GuiClone.Enabled = true
+    end
 end)
 
--- ── AUTO-SAVE ─────────────────────────────────────────────
+task.spawn(function()
+    while task.wait(2) do
+        if GuiClone and GuiClone.Parent then hydrateGui(GuiClone) else break end
+    end
+end)
+
 if writefile then
     task.spawn(function()
-        while task.wait(60) do SaveData() end
+        while task.wait(60) do saveData() end
     end)
 end
 
--- ============================================================
 print("╔══════════════════════════════════════════╗")
-print("║  Masters Standalone Executor [FIXED v9]  ║")
+print("║  Masters Standalone Executor [CLEAN v10] ║")
 print("╠══════════════════════════════════════════╣")
-print("║  FIX: Correct game ScreenGui             ║")
-print("║  FIX: Preferences schema (Artists/Songs) ║")
-print("║  FIX: Algorithm schema (Songs/Tags/...)  ║")
-print("║  FIX: Modules.Settings + TextFiltering   ║")
-print("║  FIX: Expanded all-service fallbacks      ║")
+print("║  NEW: single clean run.lua               ║")
+print("║  MOCK: remotes + engine services         ║")
+print("║  UI: username hydrate + interactable     ║")
 print("╚══════════════════════════════════════════╝")
