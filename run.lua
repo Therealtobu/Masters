@@ -26,6 +26,112 @@ local function Warn(...)
     warn("[Masters]", ...)
 end
 
+local UserInputService = game:GetService("UserInputService")
+local DefaultSettings
+local LocalData
+local client
+
+local LOCAL_AUDIO_LIBRARY = {
+    { Id = 1843529634, Title = "Relaxed Scene", Artist = "Roblox", Duration = 183, Tags = {"ambient", "chill"} },
+    { Id = 1845756489, Title = "Town Talk", Artist = "Roblox", Duration = 124, Tags = {"pop", "bright"} },
+    { Id = 1841647093, Title = "Life in an Elevator", Artist = "Roblox", Duration = 91, Tags = {"electronic", "chill"} },
+    { Id = 1837849285, Title = "Happy Home", Artist = "Roblox", Duration = 134, Tags = {"happy", "pop"} },
+    { Id = 1846458016, Title = "No More", Artist = "Roblox", Duration = 156, Tags = {"electronic", "dance"} },
+    { Id = 1848354536, Title = "Sunny", Artist = "Roblox", Duration = 138, Tags = {"bright", "pop"} },
+}
+
+local function CloneLocalAudioEntry(entry)
+    return {
+        Id = entry.Id,
+        AssetId = entry.Id,
+        SongId = entry.Id,
+        Title = entry.Title,
+        Artist = entry.Artist,
+        Duration = entry.Duration,
+        Tags = table.clone(entry.Tags or {}),
+    }
+end
+
+local function GetLocalAudioIds()
+    local ids = {}
+    for _, entry in LOCAL_AUDIO_LIBRARY do
+        table.insert(ids, entry.Id)
+    end
+    return ids
+end
+
+local function GetLocalAudioMetadata(assetIds)
+    if type(assetIds) ~= "table" then
+        assetIds = { assetIds }
+    end
+
+    local byId = {}
+    for _, entry in LOCAL_AUDIO_LIBRARY do
+        byId[entry.Id] = entry
+    end
+
+    local result = {}
+    for _, assetId in assetIds or {} do
+        local entry = byId[tonumber(assetId)] or LOCAL_AUDIO_LIBRARY[((#result) % #LOCAL_AUDIO_LIBRARY) + 1]
+        table.insert(result, CloneLocalAudioEntry(entry))
+    end
+    return result
+end
+
+local function CreateLocalAudioPages()
+    local pages = {
+        IsFinished = true,
+    }
+
+    function pages:GetCurrentPage()
+        return GetLocalAudioMetadata(GetLocalAudioIds())
+    end
+
+    function pages:AdvanceToNextPageAsync()
+        self.IsFinished = true
+    end
+
+    return pages
+end
+
+local function GetLocalUsername()
+    return (client and client.Name) or "Player"
+end
+
+local function IsMobileExecutor()
+    if CONFIG.FORCE_MOBILE_UI == true then return true end
+    if CONFIG.FORCE_MOBILE_UI == false then return false end
+
+    local ok, result = pcall(function()
+        local camera = workspace.CurrentCamera
+        local viewport = camera and camera.ViewportSize or Vector2.zero
+        local touchOnly = UserInputService.TouchEnabled
+            and not UserInputService.KeyboardEnabled
+            and not UserInputService.MouseEnabled
+        local phoneLikeViewport = viewport.X > 0
+            and viewport.Y > 0
+            and math.min(viewport.X, viewport.Y) <= 700
+
+        return UserInputService.TouchEnabled and (touchOnly or phoneLikeViewport)
+    end)
+
+    return ok and result == true
+end
+
+local MOBILE_EXECUTOR = IsMobileExecutor()
+
+local function ApplyMobileSettingsDefaults()
+    if not MOBILE_EXECUTOR then return end
+
+    if type(LocalData.Settings) ~= "table" then
+        LocalData.Settings = DefaultSettings()
+    end
+
+    LocalData.Settings.Extras = LocalData.Settings.Extras or {}
+    LocalData.Settings.Extras.Glow = false
+    LocalData.Settings.Extras.PlaybackHaptics = false
+end
+
 -- ============================================================
 --  SERVICES
 -- ============================================================
@@ -362,7 +468,12 @@ local function relativePath(instance)
     if eventsFullPath ~= "" and full:sub(1, eventsPathLen) == eventsFullPath then
         return full:sub(eventsPathLen + 2)
     end
-    return full
+
+    return {
+        Songs = songs,
+        Artists = { "Roblox" },
+        Playlists = LocalData.Library.Playlists or {},
+    }
 end
 
 local function onInvoke(path, fn) MockInvoke[path] = fn end
@@ -628,6 +739,11 @@ local function hookServicesAndRemotes()
                     Warn("Fallback InvokeServer:", path)
                     return defaultInvoke(path, ...)
                 end
+
+                if events and self:IsDescendantOf(events) then
+                    Warn("Unmocked Masters InvokeServer fallback:", path)
+                    return DefaultMockInvoke(path, ...)
+                end
             end
         elseif method == "FireServer" then
             local okRE, isRE = pcall(function() return self:IsA("RemoteEvent") end)
@@ -638,6 +754,12 @@ local function hookServicesAndRemotes()
                 if events and self:IsDescendantOf(events) then
                     Warn("Fallback FireServer:", path)
                     defaultFire(path, ...)
+                    return
+                end
+
+                if events and self:IsDescendantOf(events) then
+                    Warn("Unmocked Masters FireServer fallback:", path)
+                    DefaultMockFire(path, ...)
                     return
                 end
             end
