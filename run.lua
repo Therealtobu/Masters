@@ -1,5 +1,10 @@
 -- ============================================================
---  MASTERS STANDALONE EXECUTOR  [PATCHED v3]
+--  MASTERS STANDALONE EXECUTOR  [PATCHED v4]
+--  Fixes v4:
+--   • Mobile-safe mode: ép layout cảm ứng vào fullscreen/mobile branch
+--   • Chặn viewport điện thoại landscape bị nhận nhầm là desktop/PC
+--   • Giảm tải mobile bằng cách tắt online stations mặc định
+--   • Ẩn update/onboarding UI sớm hơn để tránh hiện nhầm bản PC
 --  Fixes v3:
 --   • Preferences schema đúng: Artists.Block / Songs.Favorite / Songs.Dislike
 --   • Algorithm schema đúng: Songs[] / Tags[] / Artists[] (arrays, not dicts)
@@ -17,6 +22,14 @@ local CONFIG = {
     SAVE_FILE       = "masters_local_data.json",
     DEBUG           = false,
     FAKE_VERSION    = "102",
+
+    -- Mobile executors can report a very wide landscape viewport, which makes
+    -- Masters pick the desktop/PC layout (>1300 ratio).  That layout is heavy
+    -- and may crash the Roblox mobile client, so touch-only devices are forced
+    -- into the mobile/fullscreen path.
+    MOBILE_SAFE_MODE                 = true,
+    MOBILE_VIEWPORT_RATIO_CAP        = 1200,
+    DISABLE_ONLINE_STATIONS_ON_MOBILE = true,
 }
 
 local function Log(...)
@@ -32,9 +45,38 @@ local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local InsertService     = game:GetService("InsertService")
 local HttpService       = game:GetService("HttpService")
+local InputService      = game:GetService("UserInputService")
 
 local client    = Players.LocalPlayer
 local PlayerGui = client:WaitForChild("PlayerGui")
+
+local function IsMobileExecutor()
+    if not CONFIG.MOBILE_SAFE_MODE then return false end
+
+    local ok, mobile = pcall(function()
+        return InputService.TouchEnabled and (not InputService.KeyboardEnabled or not InputService.MouseEnabled)
+    end)
+
+    return ok and mobile
+end
+
+local MOBILE_EXECUTOR = IsMobileExecutor()
+
+local function HideBlockingSetupUi(root)
+    if not root then return end
+
+    for _, name in {
+        "Update", "UpdateScreen", "UpdateUI", "UpdateRequired", "Onboarding",
+        "Setup", "Welcome", "Install", "UpdateInstructions", "Installation",
+        "ViewportSizeWarning", "Failsafe", "Prepublish"
+    } do
+        local frame = root:FindFirstChild(name, true)
+        if frame and frame:IsA("GuiObject") then
+            frame.Visible = false
+            frame.Active = false
+        end
+    end
+end
 
 -- ============================================================
 --  RE-EXECUTE DETECT
@@ -127,7 +169,7 @@ local LocalData = {
             LinkGroups     = {},
             LinkPlayers    = {},
         },
-        Stations       = { AutoStart = "", OnlineStations = true },
+        Stations       = { AutoStart = "", OnlineStations = not (MOBILE_EXECUTOR and CONFIG.DISABLE_ONLINE_STATIONS_ON_MOBILE) },
         CustomSections = {},
     },
 }
@@ -143,6 +185,10 @@ local function TryLoadSave()
         if saved.Settings      then LocalData.Settings      = saved.Settings      end
         if saved.LocalStations then LocalData.LocalStations = saved.LocalStations end
         Log("Loaded saved data")
+    end
+
+    if MOBILE_EXECUTOR and CONFIG.DISABLE_ONLINE_STATIONS_ON_MOBILE then
+        LocalData.Configuration.Stations.OnlineStations = false
     end
 end
 
@@ -273,13 +319,65 @@ local GuiClone
 if MastersGui then
     GuiClone = MastersGui:Clone()
     GuiClone.Parent = PlayerGui
+    HideBlockingSetupUi(GuiClone)
     Log("Injected ScreenGui →", GuiClone.Name)
+end
+
+local function ApplyMobileSafePatch(gui, storageRoot)
+    if not MOBILE_EXECUTOR then return end
+
+    Warn("Mobile executor detected — enabling mobile-safe UI mode.")
+
+    HideBlockingSetupUi(gui)
+
+    if gui then
+        pcall(function() gui.IgnoreGuiInset = true end)
+
+        local interface = gui:FindFirstChild("Interface")
+        if interface and interface:IsA("GuiObject") then
+            interface.AnchorPoint = Vector2.new(.5, .5)
+            interface.Position = UDim2.fromScale(.5, .5)
+            interface.Size = UDim2.fromScale(1, 1)
+        end
+
+        local scale = gui:FindFirstChild("scale", true)
+        if scale and scale:IsA("UIScale") then
+            scale.Scale = 1
+        end
+    end
+
+    local modules = storageRoot and storageRoot:FindFirstChild("Modules")
+    local utilitiesScript = modules and modules:FindFirstChild("Utilities")
+
+    if utilitiesScript and utilitiesScript:IsA("ModuleScript") then
+        local ok, utilities = pcall(require, utilitiesScript)
+        if ok and type(utilities) == "table" then
+            local originalGetViewportRatio = utilities.GetViewportRatio
+            utilities.GetViewportRatio = function(...)
+                local ratio
+                if type(originalGetViewportRatio) == "function" then
+                    local okRatio, result = pcall(originalGetViewportRatio, ...)
+                    if okRatio and type(result) == "number" then
+                        ratio = result
+                    end
+                end
+
+                ratio = ratio or CONFIG.MOBILE_VIEWPORT_RATIO_CAP
+                return math.min(ratio, CONFIG.MOBILE_VIEWPORT_RATIO_CAP)
+            end
+            Log("Patched Utilities.GetViewportRatio for mobile")
+        else
+            Warn("Could not patch Utilities.GetViewportRatio:", tostring(utilities))
+        end
+    end
 end
 
 task.wait(0.3)
 
 local storage = ReplicatedStorage:WaitForChild("Masters(Storage)", 15)
 if not storage then error("[Masters] Masters(Storage) did not appear in 15s.", 2) end
+
+ApplyMobileSafePatch(GuiClone, storage)
 
 local events = storage:WaitForChild("Events", 10)
 if not events then Warn("Events folder not found.") end
@@ -571,6 +669,10 @@ OnInvoke("Modules.Configuration.GetLocalStationsServer", function() return Local
 
 -- ── ONLINE STATIONS ───────────────────────────────────────
 OnInvoke("Modules.OnlineStations.GetStationsIndex", function()
+    if MOBILE_EXECUTOR and CONFIG.DISABLE_ONLINE_STATIONS_ON_MOBILE then
+        return {}
+    end
+
     local ok, result = pcall(function()
         local apiKey  = "AIzaSyAZkUG43dtTWV1L0kKZxyb_PeT9x5RlDsY"
         local sheetId = "1iJRuAArdm2fSobb0R1T4pLdaEKyyseqSsRhpyD9D7cA"
@@ -631,14 +733,7 @@ task.spawn(function()
     task.wait(1.5)
     local mg = PlayerGui:FindFirstChild("Masters")
     if not mg then return end
-    for _, name in {"Update","UpdateScreen","UpdateUI","UpdateRequired","Onboarding",
-                    "Setup","Welcome","Install","UpdateInstructions","Installation"} do
-        local frame = mg:FindFirstChild(name, true)
-        if frame and frame:IsA("GuiObject") then
-            frame.Visible = false
-            Log("Hidden:", name)
-        end
-    end
+    HideBlockingSetupUi(mg)
     for _, btn in mg:GetDescendants() do
         if btn:IsA("GuiButton") then
             local nl = btn.Name:lower()
@@ -678,10 +773,11 @@ end
 
 -- ============================================================
 print("╔══════════════════════════════════════════╗")
-print("║  Masters Standalone Executor [FIXED v3]  ║")
+print("║  Masters Standalone Executor [FIXED v4]  ║")
 print("╠══════════════════════════════════════════╣")
 print("║  FIX: Correct game ScreenGui             ║")
 print("║  FIX: Preferences schema (Artists/Songs) ║")
 print("║  FIX: Algorithm schema (Songs/Tags/...)  ║")
 print("║  FIX: Modules.Settings + TextFiltering   ║")
+print("║  FIX: Mobile-safe fullscreen UI mode     ║")
 print("╚══════════════════════════════════════════╝")
