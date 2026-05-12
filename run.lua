@@ -731,25 +731,35 @@ else
         if not ok or not isDesc then return orig(self, ...) end
 
         if method == "InvokeServer" then
-            local isRF = pcall(function() return self:IsA("RemoteFunction") end)
-            if isRF then
+            local okRF, isRF = pcall(function() return self:IsA("RemoteFunction") end)
+            if okRF and isRF then
                 local path    = GetRelativePath(self)
                 local handler = MockInvoke[path]
                 if handler then
                     Log("Intercepted InvokeServer:", path)
                     return handler(...)
                 end
+
+                if events and self:IsDescendantOf(events) then
+                    Warn("Unmocked Masters InvokeServer swallowed:", path)
+                    return nil
+                end
             end
         end
 
         if method == "FireServer" then
-            local isRE = pcall(function() return self:IsA("RemoteEvent") end)
-            if isRE then
+            local okRE, isRE = pcall(function() return self:IsA("RemoteEvent") end)
+            if okRE and isRE then
                 local path    = GetRelativePath(self)
                 local handler = MockFire[path]
                 if handler then
                     Log("Intercepted FireServer:", path)
                     handler(...)
+                    return
+                end
+
+                if events and self:IsDescendantOf(events) then
+                    Warn("Unmocked Masters FireServer swallowed:", path)
                     return
                 end
             end
@@ -759,6 +769,8 @@ else
     end)
     Log("hookmetamethod installed ✓")
 end
+
+ApplyMobileModulePatches(StorageClone)
 
 -- ============================================================
 --  PATCH ONBOARDING UI (ẩn nếu vẫn còn hiện)
@@ -798,6 +810,7 @@ task.wait(0.5)
 
 if HandlerScript then
     local clone = HandlerScript:Clone()
+    clone.Disabled = true
     clone.Parent = GuiClone or PlayerGui
     local ok, err = pcall(function() clone.Disabled = false end)
     if not ok then Warn("Handler error:", err)
