@@ -1,5 +1,29 @@
 -- ============================================================
---  MASTERS STANDALONE EXECUTOR  [PATCHED v3]
+--  MASTERS STANDALONE EXECUTOR  [PATCHED v9]
+--  Fixes v9:
+--   • Hook thêm TextService/Input/Badge/Teleport/Social/Avatar/Group/StarterGui fallbacks
+--   • Universal method fallback cho Async/Get/Set/Prompt service calls chưa biết
+--   • Mock filter-result object để text filtering không cần server thật
+--  Fixes v8:
+--   • Universal fallback cho Masters remotes chưa mock theo từng nhóm path
+--   • Hook thêm service engine Roblox thường dùng bởi UI/player/audio/http
+--   • Hydrate toàn bộ GuiObject Interactable/Active để UI không kẹt preview
+--  Fixes v7:
+--   • Mock audio metadata/library fallback để Discovery có list nhạc thật thay vì preview rỗng
+--   • Personalize placeholder "river" thành username hiện tại
+--   • Bật lại Interactable/ẩn loading sau Handler để UI dùng được nếu module load chậm
+--  Fixes v6:
+--   • Không cho Handler trong GUI clone auto-run trước khi hook/mock sẵn sàng
+--   • Cài hook + mock trước rồi mới require/patch module và start Handler duy nhất
+--   • Fix check IsA trong hook và swallow Masters remote chưa mock để tránh gọi server thật
+--  Fixes v5:
+--   • Mobile executor: không show Full UI lúc inject; chỉ reveal bar toggle sau khi Handler setup xong
+--   • Mobile executor: throttle audio discovery theo chunk + delay thay vì dồn một lúc
+--   • Mobile executor: bỏ ép full UI khi SetState("Full"), chỉ giữ layout mobile-safe
+--  Fixes v4:
+--   • Mobile executor: ép layout mobile/fullscreen thay vì UI desktop khi viewport lớn
+--   • Mobile executor: tắt glow/haptics nặng để giảm nguy cơ crash/văng app
+--   • Mobile executor: patch Utilities.GetViewportRatio trước khi Handler chạy
 --  Fixes v3:
 --   • Preferences schema đúng: Artists.Block / Songs.Favorite / Songs.Dislike
 --   • Algorithm schema đúng: Songs[] / Tags[] / Artists[] (arrays, not dicts)
@@ -17,12 +41,123 @@ local CONFIG = {
     SAVE_FILE       = "masters_local_data.json",
     DEBUG           = false,
     FAKE_VERSION    = "102",
+    -- "auto" = tự nhận diện điện thoại/tablet; true = luôn ép mobile UI; false = tắt patch mobile.
+    FORCE_MOBILE_UI = "auto",
+    MOBILE_STARTUP_REVEAL_DELAY = 1.1,
+    MOBILE_AUDIO_CHUNK_SIZE = 25,
+    MOBILE_AUDIO_CHUNK_DELAY = 1,
 }
 
 local function Log(...)
     if CONFIG.DEBUG then print("[Masters]", ...) end
 end
 local function Warn(...) warn("[Masters]", ...) end
+
+local UserInputService = game:GetService("UserInputService")
+local DefaultSettings
+local LocalData
+local client
+
+local LOCAL_AUDIO_LIBRARY = {
+    { Id = 1843529634, Title = "Relaxed Scene", Artist = "Roblox", Duration = 183, Tags = {"ambient", "chill"} },
+    { Id = 1845756489, Title = "Town Talk", Artist = "Roblox", Duration = 124, Tags = {"pop", "bright"} },
+    { Id = 1841647093, Title = "Life in an Elevator", Artist = "Roblox", Duration = 91, Tags = {"electronic", "chill"} },
+    { Id = 1837849285, Title = "Happy Home", Artist = "Roblox", Duration = 134, Tags = {"happy", "pop"} },
+    { Id = 1846458016, Title = "No More", Artist = "Roblox", Duration = 156, Tags = {"electronic", "dance"} },
+    { Id = 1848354536, Title = "Sunny", Artist = "Roblox", Duration = 138, Tags = {"bright", "pop"} },
+}
+
+local function CloneLocalAudioEntry(entry)
+    return {
+        Id = entry.Id,
+        AssetId = entry.Id,
+        SongId = entry.Id,
+        Title = entry.Title,
+        Artist = entry.Artist,
+        Duration = entry.Duration,
+        Tags = table.clone(entry.Tags or {}),
+    }
+end
+
+local function GetLocalAudioIds()
+    local ids = {}
+    for _, entry in LOCAL_AUDIO_LIBRARY do
+        table.insert(ids, entry.Id)
+    end
+    return ids
+end
+
+local function GetLocalAudioMetadata(assetIds)
+    if type(assetIds) ~= "table" then
+        assetIds = { assetIds }
+    end
+
+    local byId = {}
+    for _, entry in LOCAL_AUDIO_LIBRARY do
+        byId[entry.Id] = entry
+    end
+
+    local result = {}
+    for _, assetId in assetIds or {} do
+        local entry = byId[tonumber(assetId)] or LOCAL_AUDIO_LIBRARY[((#result) % #LOCAL_AUDIO_LIBRARY) + 1]
+        table.insert(result, CloneLocalAudioEntry(entry))
+    end
+    return result
+end
+
+local function CreateLocalAudioPages()
+    local pages = {
+        IsFinished = true,
+    }
+
+    function pages:GetCurrentPage()
+        return GetLocalAudioMetadata(GetLocalAudioIds())
+    end
+
+    function pages:AdvanceToNextPageAsync()
+        self.IsFinished = true
+    end
+
+    return pages
+end
+
+local function GetLocalUsername()
+    return (client and client.Name) or "Player"
+end
+
+local function IsMobileExecutor()
+    if CONFIG.FORCE_MOBILE_UI == true then return true end
+    if CONFIG.FORCE_MOBILE_UI == false then return false end
+
+    local ok, result = pcall(function()
+        local camera = workspace.CurrentCamera
+        local viewport = camera and camera.ViewportSize or Vector2.zero
+        local touchOnly = UserInputService.TouchEnabled
+            and not UserInputService.KeyboardEnabled
+            and not UserInputService.MouseEnabled
+        local phoneLikeViewport = viewport.X > 0
+            and viewport.Y > 0
+            and math.min(viewport.X, viewport.Y) <= 700
+
+        return UserInputService.TouchEnabled and (touchOnly or phoneLikeViewport)
+    end)
+
+    return ok and result == true
+end
+
+local MOBILE_EXECUTOR = IsMobileExecutor()
+
+local function ApplyMobileSettingsDefaults()
+    if not MOBILE_EXECUTOR then return end
+
+    if type(LocalData.Settings) ~= "table" then
+        LocalData.Settings = DefaultSettings()
+    end
+
+    LocalData.Settings.Extras = LocalData.Settings.Extras or {}
+    LocalData.Settings.Extras.Glow = false
+    LocalData.Settings.Extras.PlaybackHaptics = false
+end
 
 -- ============================================================
 --  SERVICES
@@ -32,8 +167,22 @@ local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local InsertService     = game:GetService("InsertService")
 local HttpService       = game:GetService("HttpService")
+local AssetService      = game:GetService("AssetService")
+local UserService       = game:GetService("UserService")
+local MarketplaceService = game:GetService("MarketplaceService")
+local PolicyService     = game:GetService("PolicyService")
+local ContentProvider   = game:GetService("ContentProvider")
+local HapticService     = game:GetService("HapticService")
+local GuiService        = game:GetService("GuiService")
+local TextService       = game:GetService("TextService")
+local BadgeService      = game:GetService("BadgeService")
+local TeleportService   = game:GetService("TeleportService")
+local SocialService     = game:GetService("SocialService")
+local AvatarEditorService = game:GetService("AvatarEditorService")
+local GroupService      = game:GetService("GroupService")
+local StarterGui        = game:GetService("StarterGui")
 
-local client    = Players.LocalPlayer
+client          = Players.LocalPlayer
 local PlayerGui = client:WaitForChild("PlayerGui")
 
 -- ============================================================
@@ -74,7 +223,7 @@ end
 --  LOCAL DATA — schemas match EXACT server defaults
 -- ============================================================
 
-local function DefaultSettings()
+function DefaultSettings()
     return {
         Playback = {
             Crossfade  = { Enabled = true, Duration = 3 },
@@ -114,7 +263,7 @@ local function DefaultLibrary()
     }
 end
 
-local LocalData = {
+LocalData = {
     Settings      = DefaultSettings(),
     Preferences   = DefaultPreferences(),
     Algorithm     = DefaultAlgorithm(),
@@ -128,7 +277,12 @@ local LocalData = {
             LinkPlayers    = {},
         },
         Stations       = { AutoStart = "", OnlineStations = true },
-        CustomSections = {},
+        CustomSections = {
+            LocalMastersPicks = {
+                Name = "Masters Picks",
+                Songs = GetLocalAudioIds(),
+            },
+        },
     },
 }
 
@@ -159,6 +313,7 @@ local function SaveData()
 end
 
 TryLoadSave()
+ApplyMobileSettingsDefaults()
 
 -- ============================================================
 --  LOAD MODEL
@@ -255,6 +410,229 @@ if not StorageFolder then error("[Masters] Masters(Storage) not found in model."
 if not MastersGui    then Warn("No suitable ScreenGui found.") end
 if not HandlerScript then Warn("No Handler script found.") end
 
+local function QuarantineGuiScripts(gui)
+    if not gui then return end
+
+    for _, obj in gui:GetDescendants() do
+        if obj:IsA("LocalScript") then
+            -- The cloned ScreenGui already contains Handler. If it remains enabled
+            -- when parented to PlayerGui, it can run before __namecall is hooked
+            -- and before mock handlers are registered. That race can call real
+            -- remotes / duplicate Handler and crash executors.
+            obj.Disabled = true
+            if obj.Name == "Handler" then
+                obj:Destroy()
+            end
+        end
+    end
+end
+
+local function GetMobileGuiBits(gui)
+    local interface = gui and gui:FindFirstChild("Interface", true)
+    local frame = interface and interface:FindFirstChild("Frame")
+    local bar = frame and frame:FindFirstChild("Bar")
+    local page = frame and frame:FindFirstChildWhichIsA("UIPageLayout")
+
+    return interface, frame, bar, page
+end
+
+local function ApplyMobileBarState(gui)
+    local interface, frame, bar, page = GetMobileGuiBits(gui)
+
+    if interface and interface:IsA("GuiObject") then
+        interface:SetAttribute("State", "Bar")
+        interface.AnchorPoint = Vector2.new(0.5, 0.5)
+        interface.Position = UDim2.fromScale(0.5, 0.5)
+        interface.Size = UDim2.fromOffset(300, 120)
+        interface.ImageTransparency = 0.8
+    end
+
+    if frame then
+        pcall(function() frame.Modal = false end)
+    end
+
+    if page and bar then
+        pcall(function() page:JumpTo(bar) end)
+    end
+end
+
+local function ApplyUserPersonalization(gui)
+    if not gui then return end
+
+    local username = GetLocalUsername()
+
+    for _, obj in gui:GetDescendants() do
+        if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+            local ok, current = pcall(function() return obj.Text end)
+            if ok and type(current) == "string" and current:lower() == "river" then
+                pcall(function() obj.Text = username end)
+            end
+        end
+    end
+
+    local sidebarUser = gui:FindFirstChild("User", true)
+    if sidebarUser then
+        local display = sidebarUser:FindFirstChild("Display", true)
+        if display and (display:IsA("TextLabel") or display:IsA("TextButton") or display:IsA("TextBox")) then
+            display.Text = username
+        end
+    end
+end
+
+local function HydrateRuntimeUi(gui)
+    if not gui then return end
+
+    ApplyUserPersonalization(gui)
+
+    local interface = gui:FindFirstChild("Interface", true)
+    if interface and interface:IsA("GuiObject") then
+        interface.Interactable = true
+        interface.Active = true
+    end
+
+    for _, obj in gui:GetDescendants() do
+        if obj:IsA("GuiObject") then
+            pcall(function() obj.Interactable = true end)
+            pcall(function() obj.Active = true end)
+
+            if obj:IsA("GuiButton") then
+                pcall(function() obj.Selectable = true end)
+                pcall(function() obj.AutoButtonColor = true end)
+            end
+
+            local lowerName = obj.Name:lower()
+            if lowerName == "loading" or lowerName == "throbber" or lowerName == "spinner" then
+                pcall(function() obj.Visible = false end)
+            end
+        end
+    end
+end
+
+local function ApplyMobileGuiPatches(gui)
+    if not MOBILE_EXECUTOR or not gui then return end
+
+    -- Hide the raw cloned ScreenGui first. The rbmx can briefly display its
+    -- default/full page before Handler calls Main.SetState("Bar"), which is the
+    -- flash users saw right before the app crashed.
+    gui.Enabled = false
+
+    pcall(function() gui.IgnoreGuiInset = false end)
+    pcall(function() gui.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets end)
+    pcall(function() gui.ClipToDeviceSafeArea = false end)
+
+    ApplyMobileBarState(gui)
+    ApplyUserPersonalization(gui)
+    Log("Prepared mobile-safe bar startup")
+end
+
+local function RevealMobileStartupBar(gui)
+    if not MOBILE_EXECUTOR or not gui then return end
+
+    task.delay(CONFIG.MOBILE_STARTUP_REVEAL_DELAY, function()
+        if not gui or not gui.Parent then return end
+
+        ApplyMobileBarState(gui)
+        HydrateRuntimeUi(gui)
+        gui.Enabled = true
+        Log("Revealed mobile startup bar")
+    end)
+end
+
+local function ApplyMobileModulePatches(storageRoot)
+    if not storageRoot then return end
+
+    local modules = storageRoot:FindFirstChild("Modules")
+    if not modules then return end
+
+    local utilitiesModule = modules:FindFirstChild("Utilities")
+    if utilitiesModule then
+        local ok, utilities = pcall(require, utilitiesModule)
+        if ok and type(utilities) == "table" then
+            utilities.GetViewportRatio = function()
+                return 0
+            end
+            utilities.Haptic = function() end
+            Log("Patched Utilities for mobile executor")
+        else
+            Warn("Unable to patch Utilities for mobile executor:", tostring(utilities))
+        end
+    end
+
+    local audiosModule = modules:FindFirstChild("Audios")
+    if audiosModule then
+        local ok, audios = pcall(require, audiosModule)
+        if ok and type(audios) == "table" then
+            local mobileAudiosLoaded = false
+
+            audios.GetAudioMetadataAsync = function(assetIds)
+                return GetLocalAudioMetadata(assetIds)
+            end
+
+            audios.LoadAudios = function(container)
+                task.spawn(function()
+                    local index = 1
+                    local chunk = {}
+                    local chunkSize = CONFIG.MOBILE_AUDIO_CHUNK_SIZE
+                    local chunkDelay = CONFIG.MOBILE_AUDIO_CHUNK_DELAY
+
+                    for _, entry in LOCAL_AUDIO_LIBRARY do
+                        table.insert(chunk, CloneLocalAudioEntry(entry))
+
+                        if #chunk >= chunkSize then
+                            if container then container[index] = chunk end
+                            pcall(function() audios.ChunkLoaded:Fire(index, chunk) end)
+
+                            index += 1
+                            chunk = {}
+                            task.wait(chunkDelay)
+                        end
+                    end
+
+                    if #chunk > 0 then
+                        if container then container[index] = chunk end
+                        pcall(function() audios.ChunkLoaded:Fire(index, chunk) end)
+                        task.wait(chunkDelay)
+                    end
+
+                    mobileAudiosLoaded = true
+                    pcall(function() audios.ChunkLoadingFinished:Fire() end)
+                end)
+            end
+
+            audios.IsLoaded = function()
+                return mobileAudiosLoaded
+            end
+            Log("Patched local Audios metadata/loader for mobile executor")
+        else
+            Warn("Unable to patch Audios for mobile executor:", tostring(audios))
+        end
+    end
+
+    local mainModule = modules:FindFirstChild("Main")
+    if mainModule then
+        local ok, main = pcall(require, mainModule)
+        if ok and type(main) == "table" and type(main.Fullscreen) == "function" then
+            local originalSetState = main.SetState
+            if type(originalSetState) == "function" and not main.__MastersMobileExecutorPatched then
+                main.__MastersMobileExecutorPatched = true
+                main.SetState = function(state)
+                    local result = originalSetState(state)
+                    if state == "Bar" then
+                        task.defer(function()
+                            ApplyMobileBarState(PlayerGui:FindFirstChild("Masters"))
+                        end)
+                    end
+                    return result
+                end
+            end
+            Log("Patched Main bar-state guard for mobile executor")
+        else
+            Warn("Unable to patch Main for mobile executor:", tostring(main))
+        end
+    end
+end
+
+
 -- ============================================================
 --  INJECT INTO GAME
 -- ============================================================
@@ -272,6 +650,8 @@ if existingGui then existingGui:Destroy() end
 local GuiClone
 if MastersGui then
     GuiClone = MastersGui:Clone()
+    QuarantineGuiScripts(GuiClone)
+    ApplyMobileGuiPatches(GuiClone)
     GuiClone.Parent = PlayerGui
     Log("Injected ScreenGui →", GuiClone.Name)
 end
@@ -283,6 +663,7 @@ if not storage then error("[Masters] Masters(Storage) did not appear in 15s.", 2
 
 local events = storage:WaitForChild("Events", 10)
 if not events then Warn("Events folder not found.") end
+
 
 -- ============================================================
 --  MOCK EVENT SYSTEM
@@ -304,6 +685,112 @@ end
 
 local function OnInvoke(path, fn) MockInvoke[path] = fn end
 local function OnFire(path, fn)   MockFire[path]   = fn end
+
+local function BuildDefaultLibraryResponse()
+    local songs = {}
+    for _, id in GetLocalAudioIds() do
+        table.insert(songs, id)
+    end
+
+    return {
+        Songs = songs,
+        Artists = { "Roblox" },
+        Playlists = LocalData.Library.Playlists or {},
+    }
+end
+
+local function DefaultMockInvoke(path, ...)
+    local lower = tostring(path or ""):lower()
+
+    if lower:find("check") and lower:find("version") then return true, CONFIG.FAKE_VERSION end
+    if lower:find("version") then return CONFIG.FAKE_VERSION end
+    if lower:find("settings") then return LocalData.Settings end
+    if lower:find("preference") then return LocalData.Preferences end
+    if lower:find("algorithm") then return LocalData.Algorithm end
+    if lower:find("library") and lower:find("fetch") then return BuildDefaultLibraryResponse() end
+    if lower:find("playlist") and lower:find("get") then return {} end
+    if lower:find("configuration") then return LocalData.Configuration end
+    if lower:find("localstations") then return LocalData.LocalStations end
+    if lower:find("stationsindex") or lower:find("onlinestations") then return {} end
+    if lower:find("listener") then return {} end
+    if lower:find("filter") then
+        local args = { ... }
+        return args[2] or args[1] or ""
+    end
+    if lower:find("session") then return nil end
+    if lower:find("share") then return false, "Disabled" end
+
+    if lower:find("is") or lower:find("has") or lower:find("can") then return false end
+    if lower:find("create") or lower:find("set") or lower:find("add") or lower:find("copy")
+        or lower:find("delete") or lower:find("pin") or lower:find("update")
+        or lower:find("complete") or lower:find("ready") then
+        return true
+    end
+    if lower:find("get") or lower:find("fetch") or lower:find("load") or lower:find("search") then
+        return {}
+    end
+
+    return true
+end
+
+local function DefaultMockFire(path, ...)
+    return true
+end
+
+local function CreateMockTextFilterResult(text)
+    local result = {}
+
+    function result:GetChatForUserAsync()
+        return text or ""
+    end
+
+    function result:GetNonChatStringForBroadcastAsync()
+        return text or ""
+    end
+
+    function result:GetNonChatStringForUserAsync()
+        return text or ""
+    end
+
+    return result
+end
+
+local function UniversalServiceFallback(self, method, ...)
+    local lower = tostring(method or ""):lower()
+
+    if lower:find("async") then
+        if lower:find("badge") or lower:find("owns") or lower:find("can") or lower:find("is") then
+            return false
+        end
+        if lower:find("info") then
+            return {}
+        end
+        if lower:find("thumbnail") then
+            return "rbxthumb://type=AvatarHeadShot&id=" .. tostring(client.UserId) .. "&w=150&h=150", true
+        end
+        return {}
+    end
+
+    if lower:sub(1, 3) == "get" then
+        if lower:find("mouse") or lower:find("position") or lower:find("inset") then
+            return Vector2.zero, Vector2.zero
+        end
+        if lower:find("thumbnail") then
+            return "rbxthumb://type=AvatarHeadShot&id=" .. tostring(client.UserId) .. "&w=150&h=150", true
+        end
+        if lower:find("name") then return GetLocalUsername() end
+        if lower:find("id") then return client.UserId end
+        return {}
+    end
+
+    if lower:sub(1, 3) == "set" or lower:find("prompt") or lower:find("teleport")
+        or lower:find("preload") or lower:find("award") or lower:find("vibrate")
+        or lower:find("send") then
+        return nil
+    end
+
+    return nil
+end
 
 -- ============================================================
 --  HANDLERS
@@ -593,21 +1080,167 @@ else
         local ok, isDesc = pcall(function() return self:IsDescendantOf(game) end)
         if not ok or not isDesc then return orig(self, ...) end
 
+        if self == AssetService and method == "GetAudioMetadataAsync" then
+            local assetIds = ...
+            return GetLocalAudioMetadata(assetIds)
+        end
+
+        if self == AssetService and method == "SearchAudio" then
+            return CreateLocalAudioPages()
+        end
+
+        if self == Players then
+            local first = ...
+            if method == "GetNameFromUserIdAsync" then
+                return tonumber(first) == client.UserId and client.Name or ("Player_" .. tostring(first))
+            elseif method == "GetUserIdFromNameAsync" then
+                return client.UserId
+            elseif method == "GetUserThumbnailAsync" then
+                return "rbxthumb://type=AvatarHeadShot&id=" .. tostring(first or client.UserId) .. "&w=150&h=150", true
+            elseif method == "GetPlayerByUserId" then
+                return tonumber(first) == client.UserId and client or nil
+            elseif method == "GetPlayers" then
+                return { client }
+            end
+        end
+
+        if self == UserService and method == "GetUserInfosByUserIdsAsync" then
+            local userIds = ...
+            if type(userIds) ~= "table" then userIds = { client.UserId } end
+
+            local result = {}
+            for _, userId in userIds do
+                table.insert(result, {
+                    Id = userId,
+                    Username = tonumber(userId) == client.UserId and client.Name or ("Player_" .. tostring(userId)),
+                    DisplayName = tonumber(userId) == client.UserId and client.DisplayName or ("Player " .. tostring(userId)),
+                })
+            end
+            return result
+        end
+
+        if self == MarketplaceService and method == "GetProductInfo" then
+            local assetId = tonumber((...)) or 0
+            local meta = GetLocalAudioMetadata({ assetId })[1]
+            return {
+                AssetId = assetId,
+                Name = meta and meta.Title or ("Asset " .. tostring(assetId)),
+                Description = "Mocked asset metadata",
+                Creator = { Id = 1, Name = meta and meta.Artist or "Roblox", CreatorType = "User" },
+                AssetTypeId = 3,
+            }
+        end
+
+        if self == PolicyService and method == "GetPolicyInfoForPlayerAsync" then
+            return {
+                AreAdsAllowed = false,
+                IsPaidRandomItemsRestricted = false,
+                AllowedExternalLinkReferences = {},
+                IsSubjectToChinaPolicies = false,
+            }
+        end
+
+        if self == HttpService then
+            if method == "GetAsync" then
+                return HttpService:JSONEncode({ values = {}, ok = true })
+            elseif method == "RequestAsync" then
+                return { Success = true, StatusCode = 200, Body = HttpService:JSONEncode({ ok = true }) }
+            elseif method == "PostAsync" then
+                return HttpService:JSONEncode({ ok = true })
+            end
+        end
+
+        if self == ContentProvider and method == "PreloadAsync" then
+            return nil
+        end
+
+        if self == HapticService then
+            return nil
+        end
+
+        if self == GuiService and method == "GetGuiInset" then
+            return Vector2.zero, Vector2.zero
+        end
+
+        if self == TextService then
+            local text = tostring((...) or "")
+            if method == "FilterStringAsync" then
+                return CreateMockTextFilterResult(text)
+            elseif method == "GetTextSize" then
+                return Vector2.new(math.max(#text * 8, 16), 18)
+            elseif method == "GetTextBoundsAsync" then
+                return Vector2.new(math.max(#text * 8, 16), 18)
+            end
+            return UniversalServiceFallback(self, method, ...)
+        end
+
+        if self == UserInputService then
+            if method == "GetMouseLocation" then
+                return Vector2.zero
+            elseif method == "GetLastInputType" then
+                return Enum.UserInputType.Touch
+            elseif method == "IsKeyDown" or method == "IsMouseButtonPressed" then
+                return false
+            end
+            return UniversalServiceFallback(self, method, ...)
+        end
+
+        if self == BadgeService then
+            if method == "UserHasBadgeAsync" then return false end
+            if method == "AwardBadge" then return nil end
+            return UniversalServiceFallback(self, method, ...)
+        end
+
+        if self == TeleportService then
+            return UniversalServiceFallback(self, method, ...)
+        end
+
+        if self == SocialService then
+            if method == "CanSendGameInviteAsync" then return false end
+            return UniversalServiceFallback(self, method, ...)
+        end
+
+        if self == AvatarEditorService then
+            if method == "GetAvatarRules" then return {} end
+            if method == "GetOutfitDetails" then return {} end
+            return UniversalServiceFallback(self, method, ...)
+        end
+
+        if self == GroupService then
+            if method == "GetGroupInfoAsync" then
+                return { Id = tonumber((...)) or 0, Name = "Mock Group", Owner = nil }
+            elseif method == "GetGroupsAsync" then
+                return {}
+            end
+            return UniversalServiceFallback(self, method, ...)
+        end
+
+        if self == StarterGui then
+            if method == "SetCore" then return nil end
+            if method == "GetCore" then return nil end
+            return UniversalServiceFallback(self, method, ...)
+        end
+
         if method == "InvokeServer" then
-            local isRF = pcall(function() return self:IsA("RemoteFunction") end)
-            if isRF then
+            local okRF, isRF = pcall(function() return self:IsA("RemoteFunction") end)
+            if okRF and isRF then
                 local path    = GetRelativePath(self)
                 local handler = MockInvoke[path]
                 if handler then
                     Log("Intercepted InvokeServer:", path)
                     return handler(...)
                 end
+
+                if events and self:IsDescendantOf(events) then
+                    Warn("Unmocked Masters InvokeServer fallback:", path)
+                    return DefaultMockInvoke(path, ...)
+                end
             end
         end
 
         if method == "FireServer" then
-            local isRE = pcall(function() return self:IsA("RemoteEvent") end)
-            if isRE then
+            local okRE, isRE = pcall(function() return self:IsA("RemoteEvent") end)
+            if okRE and isRE then
                 local path    = GetRelativePath(self)
                 local handler = MockFire[path]
                 if handler then
@@ -615,13 +1248,29 @@ else
                     handler(...)
                     return
                 end
+
+                if events and self:IsDescendantOf(events) then
+                    Warn("Unmocked Masters FireServer fallback:", path)
+                    DefaultMockFire(path, ...)
+                    return
+                end
             end
+        end
+
+        if self == Players or self == UserService or self == MarketplaceService or self == PolicyService
+            or self == HttpService or self == ContentProvider or self == HapticService or self == GuiService
+            or self == TextService or self == UserInputService or self == BadgeService or self == TeleportService
+            or self == SocialService or self == AvatarEditorService or self == GroupService or self == StarterGui
+            or self == AssetService then
+            return UniversalServiceFallback(self, method, ...)
         end
 
         return orig(self, ...)
     end)
     Log("hookmetamethod installed ✓")
 end
+
+ApplyMobileModulePatches(StorageClone)
 
 -- ============================================================
 --  PATCH ONBOARDING UI (ẩn nếu vẫn còn hiện)
@@ -661,6 +1310,7 @@ task.wait(0.5)
 
 if HandlerScript then
     local clone = HandlerScript:Clone()
+    clone.Disabled = true
     clone.Parent = GuiClone or PlayerGui
     local ok, err = pcall(function() clone.Disabled = false end)
     if not ok then Warn("Handler error:", err)
@@ -668,6 +1318,12 @@ if HandlerScript then
 else
     Warn("Handler script not found in model.")
 end
+
+RevealMobileStartupBar(GuiClone)
+
+task.delay(2, function()
+    HydrateRuntimeUi(GuiClone)
+end)
 
 -- ── AUTO-SAVE ─────────────────────────────────────────────
 if writefile then
@@ -678,10 +1334,11 @@ end
 
 -- ============================================================
 print("╔══════════════════════════════════════════╗")
-print("║  Masters Standalone Executor [FIXED v3]  ║")
+print("║  Masters Standalone Executor [FIXED v9]  ║")
 print("╠══════════════════════════════════════════╣")
 print("║  FIX: Correct game ScreenGui             ║")
 print("║  FIX: Preferences schema (Artists/Songs) ║")
 print("║  FIX: Algorithm schema (Songs/Tags/...)  ║")
 print("║  FIX: Modules.Settings + TextFiltering   ║")
+print("║  FIX: Expanded all-service fallbacks      ║")
 print("╚══════════════════════════════════════════╝")
