@@ -404,6 +404,7 @@ if existingGui then existingGui:Destroy() end
 local GuiClone
 if MastersGui then
     GuiClone = MastersGui:Clone()
+    ApplyMobileGuiPatches(GuiClone)
     GuiClone.Parent = PlayerGui
     ApplyMobileGuiPatches(GuiClone)
     Log("Injected ScreenGui →", GuiClone.Name)
@@ -804,6 +805,8 @@ if HandlerScript then
 else
     Warn("Handler script not found in model.")
 end
+
+RevealMobileStartupBar(GuiClone)
 
 -- ── AUTO-SAVE ─────────────────────────────────────────────
 if writefile then
