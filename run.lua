@@ -1,5 +1,9 @@
 -- ============================================================
---  MASTERS STANDALONE EXECUTOR  [PATCHED v3]
+--  MASTERS STANDALONE EXECUTOR  [PATCHED v4]
+--  Fixes v4:
+--   • Mobile executor: ép layout mobile/fullscreen thay vì UI desktop khi viewport lớn
+--   • Mobile executor: tắt glow/haptics nặng để giảm nguy cơ crash/văng app
+--   • Mobile executor: patch Utilities.GetViewportRatio trước khi Handler chạy
 --  Fixes v3:
 --   • Preferences schema đúng: Artists.Block / Songs.Favorite / Songs.Dislike
 --   • Algorithm schema đúng: Songs[] / Tags[] / Artists[] (arrays, not dicts)
@@ -17,12 +21,52 @@ local CONFIG = {
     SAVE_FILE       = "masters_local_data.json",
     DEBUG           = false,
     FAKE_VERSION    = "102",
+    -- "auto" = tự nhận diện điện thoại/tablet; true = luôn ép mobile UI; false = tắt patch mobile.
+    FORCE_MOBILE_UI = "auto",
 }
 
 local function Log(...)
     if CONFIG.DEBUG then print("[Masters]", ...) end
 end
 local function Warn(...) warn("[Masters]", ...) end
+
+local UserInputService = game:GetService("UserInputService")
+local DefaultSettings
+local LocalData
+
+local function IsMobileExecutor()
+    if CONFIG.FORCE_MOBILE_UI == true then return true end
+    if CONFIG.FORCE_MOBILE_UI == false then return false end
+
+    local ok, result = pcall(function()
+        local camera = workspace.CurrentCamera
+        local viewport = camera and camera.ViewportSize or Vector2.zero
+        local touchOnly = UserInputService.TouchEnabled
+            and not UserInputService.KeyboardEnabled
+            and not UserInputService.MouseEnabled
+        local phoneLikeViewport = viewport.X > 0
+            and viewport.Y > 0
+            and math.min(viewport.X, viewport.Y) <= 700
+
+        return UserInputService.TouchEnabled and (touchOnly or phoneLikeViewport)
+    end)
+
+    return ok and result == true
+end
+
+local MOBILE_EXECUTOR = IsMobileExecutor()
+
+local function ApplyMobileSettingsDefaults()
+    if not MOBILE_EXECUTOR then return end
+
+    if type(LocalData.Settings) ~= "table" then
+        LocalData.Settings = DefaultSettings()
+    end
+
+    LocalData.Settings.Extras = LocalData.Settings.Extras or {}
+    LocalData.Settings.Extras.Glow = false
+    LocalData.Settings.Extras.PlaybackHaptics = false
+end
 
 -- ============================================================
 --  SERVICES
@@ -74,7 +118,7 @@ end
 --  LOCAL DATA — schemas match EXACT server defaults
 -- ============================================================
 
-local function DefaultSettings()
+function DefaultSettings()
     return {
         Playback = {
             Crossfade  = { Enabled = true, Duration = 3 },
@@ -114,7 +158,7 @@ local function DefaultLibrary()
     }
 end
 
-local LocalData = {
+LocalData = {
     Settings      = DefaultSettings(),
     Preferences   = DefaultPreferences(),
     Algorithm     = DefaultAlgorithm(),
@@ -159,6 +203,7 @@ local function SaveData()
 end
 
 TryLoadSave()
+ApplyMobileSettingsDefaults()
 
 -- ============================================================
 --  LOAD MODEL
@@ -255,6 +300,93 @@ if not StorageFolder then error("[Masters] Masters(Storage) not found in model."
 if not MastersGui    then Warn("No suitable ScreenGui found.") end
 if not HandlerScript then Warn("No Handler script found.") end
 
+local function ApplyMobileGuiPatches(gui)
+    if not MOBILE_EXECUTOR or not gui then return end
+
+    pcall(function() gui.IgnoreGuiInset = false end)
+    pcall(function() gui.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets end)
+    pcall(function() gui.ClipToDeviceSafeArea = false end)
+
+    local interface = gui:FindFirstChild("Interface", true)
+    if interface and interface:IsA("GuiObject") then
+        interface.AnchorPoint = Vector2.new(0.5, 0.5)
+        interface.Position = UDim2.fromScale(0.5, 0.5)
+        interface.Size = UDim2.fromScale(1, 1)
+
+        local scale = interface:FindFirstChild("MobileExecutorScale")
+        if not scale then
+            scale = Instance.new("UIScale")
+            scale.Name = "MobileExecutorScale"
+            scale.Parent = interface
+        end
+        scale.Scale = 1
+    end
+
+    Log("Applied mobile-safe GUI defaults")
+end
+
+local function ApplyMobileModulePatches(storageRoot)
+    if not MOBILE_EXECUTOR or not storageRoot then return end
+
+    local modules = storageRoot:FindFirstChild("Modules")
+    if not modules then return end
+
+    local utilitiesModule = modules:FindFirstChild("Utilities")
+    if utilitiesModule then
+        local ok, utilities = pcall(require, utilitiesModule)
+        if ok and type(utilities) == "table" then
+            utilities.GetViewportRatio = function()
+                return 0
+            end
+            utilities.Haptic = function() end
+            Log("Patched Utilities for mobile executor")
+        else
+            Warn("Unable to patch Utilities for mobile executor:", tostring(utilities))
+        end
+    end
+
+    local audiosModule = modules:FindFirstChild("Audios")
+    if audiosModule then
+        local ok, audios = pcall(require, audiosModule)
+        if ok and type(audios) == "table" then
+            audios.LoadAudios = function()
+                task.defer(function()
+                    pcall(function() audios.ChunkLoadingFinished:Fire() end)
+                end)
+            end
+            audios.IsLoaded = function() return true end
+            Log("Patched Audios loader for mobile executor")
+        else
+            Warn("Unable to patch Audios for mobile executor:", tostring(audios))
+        end
+    end
+
+    local mainModule = modules:FindFirstChild("Main")
+    if mainModule then
+        local ok, main = pcall(require, mainModule)
+        if ok and type(main) == "table" and type(main.Fullscreen) == "function" then
+            local originalSetState = main.SetState
+            if type(originalSetState) == "function" and not main.__MastersMobileExecutorPatched then
+                main.__MastersMobileExecutorPatched = true
+                main.SetState = function(state)
+                    local result = originalSetState(state)
+                    if state == "Full" then
+                        task.defer(function()
+                            pcall(function() main.Fullscreen(true) end)
+                            pcall(function() main.Sidebar(false) end)
+                        end)
+                    end
+                    return result
+                end
+            end
+            Log("Patched Main for mobile executor")
+        else
+            Warn("Unable to patch Main for mobile executor:", tostring(main))
+        end
+    end
+end
+
+
 -- ============================================================
 --  INJECT INTO GAME
 -- ============================================================
@@ -273,8 +405,11 @@ local GuiClone
 if MastersGui then
     GuiClone = MastersGui:Clone()
     GuiClone.Parent = PlayerGui
+    ApplyMobileGuiPatches(GuiClone)
     Log("Injected ScreenGui →", GuiClone.Name)
 end
+
+ApplyMobileModulePatches(StorageClone)
 
 task.wait(0.3)
 
@@ -283,6 +418,7 @@ if not storage then error("[Masters] Masters(Storage) did not appear in 15s.", 2
 
 local events = storage:WaitForChild("Events", 10)
 if not events then Warn("Events folder not found.") end
+
 
 -- ============================================================
 --  MOCK EVENT SYSTEM
@@ -678,10 +814,11 @@ end
 
 -- ============================================================
 print("╔══════════════════════════════════════════╗")
-print("║  Masters Standalone Executor [FIXED v3]  ║")
+print("║  Masters Standalone Executor [FIXED v4]  ║")
 print("╠══════════════════════════════════════════╣")
 print("║  FIX: Correct game ScreenGui             ║")
 print("║  FIX: Preferences schema (Artists/Songs) ║")
 print("║  FIX: Algorithm schema (Songs/Tags/...)  ║")
 print("║  FIX: Modules.Settings + TextFiltering   ║")
+print("║  FIX: Mobile executor safe UI            ║")
 print("╚══════════════════════════════════════════╝")
