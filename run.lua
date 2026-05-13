@@ -22,6 +22,7 @@ local CONFIG = {
     FAKE_VERSION    = "102",
     REVEAL_DELAY    = 0.75,
     AUDIO_CHUNK_DELAY = 0.25,
+    RUN_HANDLER      = false, -- Handler gốc đang gây crash liên tục ở nhiều executor
 }
 
 if getgenv and getgenv().__MastersStandaloneBooting then
@@ -1477,7 +1478,7 @@ patchModules()
 -- ============================================================
 task.wait(0.25)
 
-if HandlerScript then
+if CONFIG.RUN_HANDLER and HandlerScript then
     local function startHandlerByClone()
         local handler=HandlerScript:Clone()
         handler.Disabled=true
