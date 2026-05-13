@@ -22,7 +22,16 @@ local CONFIG = {
     FAKE_VERSION    = "102",
     REVEAL_DELAY    = 0.75,
     AUDIO_CHUNK_DELAY = 0.25,
+    RUN_HANDLER      = true,
 }
+
+if getgenv and getgenv().__MastersStandaloneBooting then
+    warn("[Masters] Existing runtime detected, skipping duplicate bootstrap.")
+    return
+end
+if getgenv then
+    getgenv().__MastersStandaloneBooting = true
+end
 
 local function Log(...)  if CONFIG.DEBUG then print("[Masters]", ...) end end
 local function Warn(...) warn("[Masters]", ...) end
@@ -219,7 +228,6 @@ local function disableEmbeddedScripts(gui)
     for _,obj in ipairs(gui:GetDescendants()) do
         if obj:IsA("LocalScript") then
             obj.Disabled=true
-            if obj.Name=="Handler" then obj:Destroy() end
         end
     end
 end
@@ -1053,6 +1061,7 @@ STORAGE_MOCKS["Queue"]=(function()
     local _loading=false
     local _crossfading=false
     local _settings={Shuffle=false,RepeatMode="None"}
+    local _repeating=false
     local _trackCounter=0
 
     -- Signals
@@ -1061,6 +1070,13 @@ STORAGE_MOCKS["Queue"]=(function()
     Q.StatusChanged =makeSignal()
 
     local function nextTid() _trackCounter+=1; return tostring(_trackCounter) end
+    local function syncPublicQueueRefs()
+        Q.Queue=_queue
+        Q.ContinuePlaying=_continuePlaying
+        Q.QueueSection=_queue
+        Q.ContinuePlayingSection=_continuePlaying
+        Q.Repeating=_repeating
+    end
 
     function Q.LoadSource(songIds,pointer,contextName,play)
         if type(songIds)~="table" or #songIds==0 then return end
@@ -1077,6 +1093,7 @@ STORAGE_MOCKS["Queue"]=(function()
             Q.TrackChanged:Fire(startId)
             Q.QueueUpdated:Fire()
         end
+        syncPublicQueueRefs()
     end
 
     function Q.GetVisualQueue()   return {Queue=_queue,ContinuePlaying=_continuePlaying} end
@@ -1094,6 +1111,8 @@ STORAGE_MOCKS["Queue"]=(function()
     end
     function Q.ToggleRepeat()
         _settings.RepeatMode=_settings.RepeatMode=="Song" and "None" or "Song"
+        _repeating=_settings.RepeatMode~="None"
+        syncPublicQueueRefs()
         Q.StatusChanged:Fire({Settings=_settings})
     end
 
@@ -1105,22 +1124,35 @@ STORAGE_MOCKS["Queue"]=(function()
     function Q.PlayNext(songs)
         if type(songs)~="table" then return end
         for i=#songs,1,-1 do table.insert(_queue,1,{Id=songs[i],TrackingId=nextTid()}) end
+        syncPublicQueueRefs()
         Q.QueueUpdated:Fire()
     end
     function Q.AddToQueue(songs)
         if type(songs)~="table" then return end
         for _,id in ipairs(songs) do table.insert(_continuePlaying,{Id=id,TrackingId=nextTid()}) end
+        syncPublicQueueRefs()
         Q.QueueUpdated:Fire()
     end
     function Q.ClearQueue()
-        _queue={}; Q.QueueUpdated:Fire()
+        _queue={}; syncPublicQueueRefs(); Q.QueueUpdated:Fire()
     end
     function Q.ClearContinuePlaying()
-        _continuePlaying={}; Q.QueueUpdated:Fire()
+        _continuePlaying={}; syncPublicQueueRefs(); Q.QueueUpdated:Fire()
+    end
+    function Q.RemoveFromQueue(indexOrTrackingId)
+        if type(indexOrTrackingId)=="number" then
+            table.remove(_queue,indexOrTrackingId)
+        else
+            Q.RemoveByTrackingId(indexOrTrackingId)
+            return
+        end
+        syncPublicQueueRefs()
+        Q.QueueUpdated:Fire()
     end
     function Q.RemoveByTrackingId(tid)
         for i,item in ipairs(_queue) do if item.TrackingId==tid then table.remove(_queue,i); break end end
         for i,item in ipairs(_continuePlaying) do if item.TrackingId==tid then table.remove(_continuePlaying,i); break end end
+        syncPublicQueueRefs()
         Q.QueueUpdated:Fire()
     end
     function Q.ProceedByTrackingId(tid)
@@ -1130,6 +1162,7 @@ STORAGE_MOCKS["Queue"]=(function()
                 _currentSongId=item.Id
                 local meta=localAudioMetadata({item.Id})[1]; _currentMetadata=meta
                 table.remove(_continuePlaying,i)
+                syncPublicQueueRefs()
                 Q.TrackChanged:Fire(item.Id)
                 Q.QueueUpdated:Fire()
                 return
@@ -1140,12 +1173,15 @@ STORAGE_MOCKS["Queue"]=(function()
                 _currentSongId=item.Id
                 local meta=localAudioMetadata({item.Id})[1]; _currentMetadata=meta
                 table.remove(_queue,i)
+                syncPublicQueueRefs()
                 Q.TrackChanged:Fire(item.Id)
                 Q.QueueUpdated:Fire()
                 return
             end
         end
     end
+
+    syncPublicQueueRefs()
 
     return makeSafeMock(Q,"Queue")
 end)()
@@ -1237,6 +1273,7 @@ STORAGE_MOCKS["Main"]=(function()
 
     -- SetLastPosition
     function m.SetLastPosition(pos) _lastPos=pos end
+    function m.GetLastPosition() return _lastPos end
 
     -- Sidebar
     function m.Sidebar(open,fullscreen)
@@ -1271,6 +1308,29 @@ STORAGE_MOCKS["Main"]=(function()
 
     -- PromptShare
     function m.PromptShare(data) return nil end
+
+    -- Top-level navigation helpers used by Handler buttons
+    function m.Settings(open)
+        if open then m.SetPage("Settings") else m.SetPage(_lastMainPage or "Discovery") end
+        return true
+    end
+    function m.Library(open)
+        if open then m.SetPage("Library") end
+        return true
+    end
+    function m.Preferences(open)
+        if open then m.SetPage("Preferences") end
+        return true
+    end
+    function m.Algorithm(open)
+        if open then m.SetPage("Discovery") end
+        return true
+    end
+    function m.SessionSaving() return true end
+    function m.Sharing(open)
+        if open then m.SetPage("Sharing") end
+        return true
+    end
 
     -- Playback controls (no-ops for now)
     function m.Play()        return true end
@@ -1470,12 +1530,18 @@ patchModules()
 -- ============================================================
 task.wait(0.25)
 
-if HandlerScript then
+local HANDLER_STARTED=false
+if CONFIG.RUN_HANDLER and HandlerScript then
     local handler=HandlerScript:Clone()
     handler.Disabled=true
     handler.Parent=GuiClone or PlayerGui
     local ok,err=pcall(function() handler.Disabled=false end)
-    if ok then Log("Handler started") else Warn("Handler error:",err) end
+    if ok then
+        HANDLER_STARTED=true
+        Log("Handler started")
+    else
+        Warn("Handler start failed:",err)
+    end
 end
 
 task.delay(CONFIG.REVEAL_DELAY, function()
@@ -1535,20 +1601,38 @@ task.delay(CONFIG.REVEAL_DELAY, function()
                 end
             end
 
-            -- Fallback overlay button
-            if not connected then
-                local overlay=Instance.new("TextButton")
-                overlay.Name="MastersClickOverlay"
-                overlay.Size=UDim2.fromScale(1,1)
-                overlay.BackgroundTransparency=1
-                overlay.Text=""
-                overlay.ZIndex=10
-                overlay.Parent=bar or interface
-                overlay.Activated:Connect(function()
-                    local st=interface:GetAttribute("State") or "Bar"
-                    if st=="Bar" then expandUI() else collapseUI() end
+            -- no overlay fallback: avoid blocking touches/gameplay under the bar
+
+            -- Drag fallback in Bar state (when Handler drag is broken)
+            local dragging=false
+            local dragStart,startPos=nil,nil
+            local dragEndConn=nil
+            interface.InputBegan:Connect(function(input)
+                if input.UserInputType~=Enum.UserInputType.Touch
+                and input.UserInputType~=Enum.UserInputType.MouseButton1 then return end
+                local st=interface:GetAttribute("State") or "Bar"
+                if st~="Bar" then return end
+                dragging=true
+                dragStart=input.Position
+                startPos=interface.Position
+                if dragEndConn then dragEndConn:Disconnect() end
+                dragEndConn=input.Changed:Connect(function()
+                    if input.UserInputState==Enum.UserInputState.End then
+                        dragging=false
+                        STORAGE_MOCKS["Main"].SetLastPosition(interface.Position)
+                    end
                 end)
-            end
+            end)
+            UserInputService.InputChanged:Connect(function(input)
+                if not dragging or not dragStart or not startPos then return end
+                if input.UserInputType~=Enum.UserInputType.Touch
+                and input.UserInputType~=Enum.UserInputType.MouseMovement then return end
+                local delta=input.Position-dragStart
+                interface.Position=UDim2.new(
+                    startPos.X.Scale, startPos.X.Offset+delta.X,
+                    startPos.Y.Scale, startPos.Y.Offset+delta.Y
+                )
+            end)
 
             -- UserInputService fallback
             UserInputService.InputBegan:Connect(function(input,gpe)
