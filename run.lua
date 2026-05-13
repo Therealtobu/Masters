@@ -22,7 +22,16 @@ local CONFIG = {
     FAKE_VERSION    = "102",
     REVEAL_DELAY    = 0.75,
     AUDIO_CHUNK_DELAY = 0.25,
+    RUN_HANDLER      = false, -- Handler gốc đang gây crash liên tục ở nhiều executor
 }
+
+if getgenv and getgenv().__MastersStandaloneBooting then
+    warn("[Masters] Existing runtime detected, skipping duplicate bootstrap.")
+    return
+end
+if getgenv then
+    getgenv().__MastersStandaloneBooting = true
+end
 
 local function Log(...)  if CONFIG.DEBUG then print("[Masters]", ...) end end
 local function Warn(...) warn("[Masters]", ...) end
@@ -219,7 +228,6 @@ local function disableEmbeddedScripts(gui)
     for _,obj in ipairs(gui:GetDescendants()) do
         if obj:IsA("LocalScript") then
             obj.Disabled=true
-            if obj.Name=="Handler" then obj:Destroy() end
         end
     end
 end
@@ -1470,12 +1478,41 @@ patchModules()
 -- ============================================================
 task.wait(0.25)
 
-if HandlerScript then
-    local handler=HandlerScript:Clone()
-    handler.Disabled=true
-    handler.Parent=GuiClone or PlayerGui
-    local ok,err=pcall(function() handler.Disabled=false end)
-    if ok then Log("Handler started") else Warn("Handler error:",err) end
+if CONFIG.RUN_HANDLER and HandlerScript then
+    local function startHandlerByClone()
+        local handler=HandlerScript:Clone()
+        handler.Disabled=true
+        handler.Parent=GuiClone or PlayerGui
+        local ok,err=pcall(function() handler.Disabled=false end)
+        if ok then Log("Handler started (clone)") else Warn("Handler clone start failed:",err) end
+    end
+
+    local startedFromSource=false
+    if getscriptbytecode and loadstring then
+        local ok,err=pcall(function()
+            local source=getscriptsource and getscriptsource(HandlerScript)
+            if type(source)~="string" or source=="" then return end
+            local chunk,compileErr=loadstring(source,"@"..HandlerScript:GetFullName())
+            if not chunk then error(compileErr or "loadstring failed") end
+            local env=getgenv and getgenv() or _G
+            setfenv(chunk,setmetatable({script=HandlerScript},{
+                __index=env,
+                __newindex=env,
+            }))
+            task.defer(function()
+                local okRun,runErr=xpcall(chunk,debug.traceback)
+                if not okRun then Warn("Handler source runtime failed:",runErr) end
+            end)
+            startedFromSource=true
+        end)
+        if not ok then Warn("Handler source injection failed:",err) end
+    end
+
+    if not startedFromSource then
+        startHandlerByClone()
+    else
+        Log("Handler started (source inject)")
+    end
 end
 
 task.delay(CONFIG.REVEAL_DELAY, function()
