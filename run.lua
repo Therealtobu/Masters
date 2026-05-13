@@ -22,7 +22,16 @@ local CONFIG = {
     FAKE_VERSION    = "102",
     REVEAL_DELAY    = 0.75,
     AUDIO_CHUNK_DELAY = 0.25,
+    RUN_HANDLER      = true,
 }
+
+if getgenv and getgenv().__MastersStandaloneBooting then
+    warn("[Masters] Existing runtime detected, skipping duplicate bootstrap.")
+    return
+end
+if getgenv then
+    getgenv().__MastersStandaloneBooting = true
+end
 
 local function Log(...)  if CONFIG.DEBUG then print("[Masters]", ...) end end
 local function Warn(...) warn("[Masters]", ...) end
@@ -219,7 +228,6 @@ local function disableEmbeddedScripts(gui)
     for _,obj in ipairs(gui:GetDescendants()) do
         if obj:IsA("LocalScript") then
             obj.Disabled=true
-            if obj.Name=="Handler" then obj:Destroy() end
         end
     end
 end
@@ -1470,12 +1478,18 @@ patchModules()
 -- ============================================================
 task.wait(0.25)
 
-if HandlerScript then
+local HANDLER_STARTED=false
+if CONFIG.RUN_HANDLER and HandlerScript then
     local handler=HandlerScript:Clone()
     handler.Disabled=true
     handler.Parent=GuiClone or PlayerGui
     local ok,err=pcall(function() handler.Disabled=false end)
-    if ok then Log("Handler started") else Warn("Handler error:",err) end
+    if ok then
+        HANDLER_STARTED=true
+        Log("Handler started")
+    else
+        Warn("Handler start failed:",err)
+    end
 end
 
 task.delay(CONFIG.REVEAL_DELAY, function()
@@ -1485,6 +1499,7 @@ task.delay(CONFIG.REVEAL_DELAY, function()
         GuiClone.Enabled=true
 
         task.spawn(function()
+            if HANDLER_STARTED then return end -- let real Handler manage interactions
             task.wait(0.2)
             local interface=GuiClone:FindFirstChild("Interface",true)
             if not interface then return end
