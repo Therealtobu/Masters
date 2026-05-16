@@ -1,0 +1,162 @@
+[
+  {
+    "robloxPath": "Masters/Plugin",
+    "className": "Script",
+    "file": "Masters_lua_tree/Masters/Plugin.server.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Server)/Handlers/Server",
+    "className": "Script",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Server)/Handlers/Server.server.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Server)/Handlers/Manager",
+    "className": "Script",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Server)/Handlers/Manager.server.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Server)/Components/Masters/Handler",
+    "className": "LocalScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Server)/Components/Masters/Handler.client.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Server)/Components/Masters/TextButton/LocalScript",
+    "className": "LocalScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Server)/Components/Masters/TextButton/LocalScript.client.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Server)/System/Playback",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Server)/System/Playback.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Server)/System/Preferences",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Server)/System/Preferences.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Server)/System/Algorithm",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Server)/System/Algorithm.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Server)/System/Library",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Server)/System/Library.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Server)/System/Sharing",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Server)/System/Sharing.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Server)/System/SessionSaving",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Server)/System/SessionSaving.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Server)/System/Settings",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Server)/System/Settings.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Server)/System/DataManagement",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Server)/System/DataManagement.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Storage)/Modules/Utilities",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Storage)/Modules/Utilities.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Storage)/Modules/Configuration",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Storage)/Modules/Configuration.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Storage)/Modules/Signal",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Storage)/Modules/Signal.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Storage)/Modules/Audios",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Storage)/Modules/Audios.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Storage)/Modules/Settings",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Storage)/Modules/Settings.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Storage)/Modules/Main",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Storage)/Modules/Main.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Storage)/Modules/Alerts",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Storage)/Modules/Alerts.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Storage)/Modules/LyricsEngine",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Storage)/Modules/LyricsEngine.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Storage)/Modules/Smoothness",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Storage)/Modules/Smoothness.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Storage)/Modules/Listeners",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Storage)/Modules/Listeners.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Storage)/Modules/OnlineStations",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Storage)/Modules/OnlineStations.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Storage)/Modules/TextFiltering",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Storage)/Modules/TextFiltering.lua"
+  },
+  {
+    "robloxPath": "Masters/MainFile/Masters(Storage)/Modules/Queue",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/MainFile/Masters(Storage)/Modules/Queue.lua"
+  },
+  {
+    "robloxPath": "Masters/Modules/Sounds",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/Modules/Sounds.lua"
+  },
+  {
+    "robloxPath": "Masters/Modules/Alerts",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/Modules/Alerts.lua"
+  },
+  {
+    "robloxPath": "Masters/Modules/Utilities",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/Modules/Utilities.lua"
+  },
+  {
+    "robloxPath": "Masters/Modules/Toolbar",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/Modules/Toolbar.lua"
+  },
+  {
+    "robloxPath": "Masters/Modules/DataManagement",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/Modules/DataManagement.lua"
+  },
+  {
+    "robloxPath": "Masters/Modules/ContextMenu",
+    "className": "ModuleScript",
+    "file": "Masters_lua_tree/Masters/Modules/ContextMenu.lua"
+  }
+]
